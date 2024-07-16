@@ -186,7 +186,7 @@ func NewBuiltIn(
 		logger:                     logger,
 		captureDir:                 viamCaptureDotDir,
 		collectors:                 make(map[resourceMethodMetadata]*collectorAndConfig),
-		syncIntervalMins:           0,
+		syncIntervalMins:           0.1667, // Roughly 0.1 Hz
 		additionalSyncPaths:        []string{},
 		tags:                       []string{},
 		fileLastModifiedMillis:     defaultFileLastModifiedMillis,
@@ -638,6 +638,10 @@ func (svc *builtIn) Reconfigure(
 			svc.captureDir, deleteEveryNthValue, svc.syncer, svc.logger)
 	}
 
+	if svc.syncIntervalMins <= 0 {
+		return errors.New("data manager config contains sync interval <= 0")
+	}
+
 	g.Success()
 	return nil
 }
@@ -672,7 +676,7 @@ func (svc *builtIn) propagateDataSyncConfig() error {
 		return nil
 	}
 	svc.cancelSyncScheduler()
-	enabled := !svc.syncDisabled && svc.syncIntervalMins != 0.0
+	enabled := !svc.syncDisabled
 	if enabled {
 		if svc.syncer == nil {
 			if err := svc.initSyncer(svc.closedCtx); err != nil {
