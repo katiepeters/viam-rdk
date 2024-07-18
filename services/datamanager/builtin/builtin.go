@@ -83,7 +83,7 @@ var errCaptureDirectoryConfigurationDisabled = errors.New("changing the capture 
 type Config struct {
 	CaptureDir                  string   `json:"capture_dir"`
 	AdditionalSyncPaths         []string `json:"additional_sync_paths"`
-	SyncIntervalMins            float64  `json:"sync_interval_mins"`
+	SyncIntervalMins            *float64 `json:"sync_interval_mins,omitempty"`
 	CaptureDisabled             bool     `json:"capture_disabled"`
 	ScheduledSyncDisabled       bool     `json:"sync_disabled"`
 	Tags                        []string `json:"tags"`
@@ -96,6 +96,9 @@ type Config struct {
 
 // Validate returns components which will be depended upon weakly due to the above matcher.
 func (c *Config) Validate(path string) ([]string, error) {
+	if c.SyncIntervalMins != nil && *c.SyncIntervalMins <= 0 {
+		return nil, errors.New("data manager config contains sync interval <= 0; will not capture or sync until fixed or removed from config")
+	}
 	return []string{cloud.InternalServiceName.String()}, nil
 }
 
@@ -464,6 +467,12 @@ func (svc *builtIn) Reconfigure(
 	if err != nil {
 		return err
 	}
+	var syncIntervalMins float64
+	if svcConfig.SyncIntervalMins == nil {
+		syncIntervalMins = svc.syncIntervalMins
+	} else {
+		syncIntervalMins = *svcConfig.SyncIntervalMins
+	}
 
 	cloudConnSvc, err := resource.FromDependencies[cloud.ConnectionService](deps, cloud.InternalServiceName)
 	if err != nil {
@@ -614,14 +623,14 @@ func (svc *builtIn) Reconfigure(
 	if svc.syncSensor != syncSensor {
 		svc.syncSensor = syncSensor
 	}
-	syncConfigUpdated := svc.syncDisabled != svcConfig.ScheduledSyncDisabled || svc.syncIntervalMins != svcConfig.SyncIntervalMins ||
+	syncConfigUpdated := svc.syncDisabled != svcConfig.ScheduledSyncDisabled || svc.syncIntervalMins != syncIntervalMins ||
 		!reflect.DeepEqual(svc.tags, svcConfig.Tags) || svc.fileLastModifiedMillis != fileLastModifiedMillis ||
 		svc.maxSyncThreads != newMaxSyncThreadValue
 
 	if syncConfigUpdated {
 		svc.syncConfigUpdated = syncConfigUpdated
 		svc.syncDisabled = svcConfig.ScheduledSyncDisabled
-		svc.syncIntervalMins = svcConfig.SyncIntervalMins
+		svc.syncIntervalMins = syncIntervalMins
 		svc.tags = svcConfig.Tags
 		svc.fileLastModifiedMillis = fileLastModifiedMillis
 		svc.maxSyncThreads = newMaxSyncThreadValue
@@ -636,10 +645,6 @@ func (svc *builtIn) Reconfigure(
 		svc.fileDeletionBackgroundWorkers.Add(1)
 		go pollFilesystem(fileDeletionCtx, svc.fileDeletionBackgroundWorkers,
 			svc.captureDir, deleteEveryNthValue, svc.syncer, svc.logger)
-	}
-
-	if svc.syncIntervalMins <= 0 {
-		return errors.New("data manager config contains sync interval <= 0")
 	}
 
 	g.Success()
