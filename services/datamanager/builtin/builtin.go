@@ -72,6 +72,9 @@ var minNumFiles = 1000
 // Default time between checking and logging number of files in capture dir.
 var captureDirSizeLogInterval = 1 * time.Minute
 
+// Default sync interval if not specified
+var defaultSyncIntervalMins = 0.1667
+
 var (
 	clock          = clk.New()
 	deletionTicker = clk.New()
@@ -189,7 +192,7 @@ func NewBuiltIn(
 		logger:                     logger,
 		captureDir:                 viamCaptureDotDir,
 		collectors:                 make(map[resourceMethodMetadata]*collectorAndConfig),
-		syncIntervalMins:           0.1667, // Roughly 0.1 Hz
+		syncIntervalMins:           defaultSyncIntervalMins,
 		additionalSyncPaths:        []string{},
 		tags:                       []string{},
 		fileLastModifiedMillis:     defaultFileLastModifiedMillis,
@@ -467,11 +470,13 @@ func (svc *builtIn) Reconfigure(
 	if err != nil {
 		return err
 	}
-	var syncIntervalMins float64
+
+	// If new sync interval value is nil, use default value
+	var updatedSyncIntervalMins float64
 	if svcConfig.SyncIntervalMins == nil {
-		syncIntervalMins = svc.syncIntervalMins
+		updatedSyncIntervalMins = defaultSyncIntervalMins
 	} else {
-		syncIntervalMins = *svcConfig.SyncIntervalMins
+		updatedSyncIntervalMins = *svcConfig.SyncIntervalMins
 	}
 
 	cloudConnSvc, err := resource.FromDependencies[cloud.ConnectionService](deps, cloud.InternalServiceName)
@@ -623,14 +628,14 @@ func (svc *builtIn) Reconfigure(
 	if svc.syncSensor != syncSensor {
 		svc.syncSensor = syncSensor
 	}
-	syncConfigUpdated := svc.syncDisabled != svcConfig.ScheduledSyncDisabled || svc.syncIntervalMins != syncIntervalMins ||
+	syncConfigUpdated := svc.syncDisabled != svcConfig.ScheduledSyncDisabled || svc.syncIntervalMins != updatedSyncIntervalMins ||
 		!reflect.DeepEqual(svc.tags, svcConfig.Tags) || svc.fileLastModifiedMillis != fileLastModifiedMillis ||
 		svc.maxSyncThreads != newMaxSyncThreadValue
 
 	if syncConfigUpdated {
 		svc.syncConfigUpdated = syncConfigUpdated
 		svc.syncDisabled = svcConfig.ScheduledSyncDisabled
-		svc.syncIntervalMins = syncIntervalMins
+		svc.syncIntervalMins = updatedSyncIntervalMins
 		svc.tags = svcConfig.Tags
 		svc.fileLastModifiedMillis = fileLastModifiedMillis
 		svc.maxSyncThreads = newMaxSyncThreadValue
