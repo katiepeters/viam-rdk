@@ -44,3 +44,9 @@ func (server *serviceServer) DoCommand(ctx context.Context,
 	}
 	return protoutils.DoFromResourceServer(ctx, svc, req)
 }
+
+// Stats satisfies the FTDC Statser interface.
+func (server *serviceServer) Stats() any {
+	// Implement stats
+	return nil
+}
