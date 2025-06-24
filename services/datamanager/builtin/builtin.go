@@ -14,6 +14,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ var (
 	// `-untrusted-env` and the capture directory is not `~/.viam/capture`.
 	ErrCaptureDirectoryConfigurationDisabled = errors.New("changing the capture directory is prohibited in this environment")
 	viamCaptureDotDir                        = filepath.Join(os.Getenv("HOME"), ".viam", "capture")
+	realCaptureDir                           = filepath.Join(utils.ViamDotDir, "capture")
 	// This clock only exists for tests.
 	// At time of writing only a single test depends on it.
 	// We should endevor to not add more tests that depend on it unless absolutiely necessary.
@@ -55,6 +57,8 @@ func init() {
 		conf resource.Config,
 		logger logging.Logger,
 	) (datamanager.Service, error) {
+		logger.Infow("CAPTURE DIRECTORIES: ", "viamCaptureDotDir", viamCaptureDotDir, "realCaptureDir", realCaptureDir,
+			"operating system", runtime.GOOS, "architecture", runtime.GOARCH)
 		// we inject v1.NewDataSyncServiceClient and datasync.ConnToConnectivityStateEnabled as dependencies for tests
 		return New(
 			ctx,
