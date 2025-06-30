@@ -30,7 +30,7 @@ build-go:
 GO_FILES=$(shell find . -name "*.go")
 
 GOOS ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
+GOARCH = amd64
 bin/$(GOOS)-$(GOARCH)/viam-cli: $(GO_FILES) Makefile go.mod go.sum
 	# no_cgo necessary here because of motionplan -> nlopt dependency.
 	# can be removed if you can run CGO_ENABLED=0 go build ./cli/viam on your local machine.
@@ -93,8 +93,8 @@ full-static:
 
 windows:
 	mkdir -p bin/windows
-	GOOS=windows go build -tags no_cgo $(GCFLAGS) -ldflags="-extldflags=-static $(COMMON_LDFLAGS)" -o bin/windows/viam-server-$(shell go env GOARCH).exe ./web/cmd/server
-	cd bin/windows && zip viam.zip viam-server-$(shell go env GOARCH).exe
+	GOOS=windows go build -tags no_cgo $(GCFLAGS) -ldflags="-extldflags=-static $(COMMON_LDFLAGS)" -o bin/windows/viam-server-amd64.exe ./web/cmd/server
+	cd bin/windows && zip viam.zip viam-server-amd64.exe
 
 server-static-compressed: server-static
 	upx --best --lzma $(BIN_OUTPUT_PATH)/viam-server
