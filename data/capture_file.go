@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -278,5 +279,9 @@ func SensorDataFromCaptureFile(f *CaptureFile) ([]*v1.SensorData, error) {
 // CaptureFilePathWithReplacedReservedChars returns the filepath with substitutions
 // for reserved characters.
 func CaptureFilePathWithReplacedReservedChars(filepath string) string {
-	return strings.ReplaceAll(filepath, filePathReservedChars, "_")
+	// Handle Windows drive letters by preserving them and replacing other colons.
+	if runtime.GOOS == "windows" && len(filepath) >= 2 && filepath[1] == ':' {
+		return filepath[:2] + strings.ReplaceAll(filepath[2:], ":", "_")
+	}
+	return strings.ReplaceAll(filepath, ":", "_")
 }
