@@ -551,7 +551,7 @@ func (s *Sync) runScheduler(ctx context.Context, tkr *clock.Ticker, config Confi
 func (s *Sync) walkDirsAndSendFilesToSync(ctx context.Context, config Config) error {
 	s.flushCollectors()
 	var errs []error
-	for _, dir := range config.SyncPaths() {
+	for _, dir := range config.SyncPaths(s.logger) {
 		s.logger.Debugf("syncing from: %s", dir)
 		loggedDirPaths := map[string]bool{}
 		// Retrieve all files in capture dir and send them to the syncer

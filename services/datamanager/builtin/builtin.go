@@ -179,7 +179,7 @@ func (b *builtIn) Reconfigure(ctx context.Context, deps resource.Dependencies, c
 		// static error that could only be introduced at compile time.
 		return err
 	}
-
+	b.logger.Infof("KATIE KATIE viamCaptureDotDir: %s", viamCaptureDotDir)
 	if !utils.IsTrustedEnvironment(ctx) && c.CaptureDir != "" && c.CaptureDir != viamCaptureDotDir {
 		// see comment above this error definition for when this happens
 		return ErrCaptureDirectoryConfigurationDisabled
@@ -209,7 +209,7 @@ func (b *builtIn) Reconfigure(ctx context.Context, deps resource.Dependencies, c
 	// These Reconfigure calls are the only methods in builtin.Reconfigure which create / destroy resources.
 	// It is important that no errors happen for a given Reconfigure call after we being callin Reconfigure on capture & sync
 	// or we could leak goroutines, wasting resources and cauing bugs due to duplicate work.
-	b.diskSummaryLogger.reconfigure(syncConfig.SyncPaths(), diskSummaryLogInterval)
+	b.diskSummaryLogger.reconfigure(syncConfig.SyncPaths(b.logger), diskSummaryLogInterval)
 	b.capture.Reconfigure(ctx, collectorConfigsByResource, captureConfig)
 	b.sync.Reconfigure(ctx, syncConfig, cloudConnSvc)
 

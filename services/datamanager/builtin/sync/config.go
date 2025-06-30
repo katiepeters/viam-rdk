@@ -189,11 +189,13 @@ func (c *Config) logDiff(o Config, logger logging.Logger) {
 }
 
 // SyncPaths returns the capture directory and additional sync paths as a slice.
-func (c Config) SyncPaths() []string {
+func (c Config) SyncPaths(logger logging.Logger) []string {
 	// TODO(DATA-4287): Remove this once all windows machines have updated to a version of viam-server that uses the new capture directory.
 	oldCaptureDir := filepath.Join(os.Getenv("HOME"), ".viam", "capture")
 	syncPaths := append([]string{c.CaptureDir}, c.AdditionalSyncPaths...)
+	logger.Infof("JOY JOY c.CaptureDir: %s", c.CaptureDir)
 	if c.CaptureDir != oldCaptureDir {
+		logger.Infof("PETERS PETERS oldCaptureDir: %s", oldCaptureDir)
 		syncPaths = append(syncPaths, oldCaptureDir)
 	}
 	return syncPaths
