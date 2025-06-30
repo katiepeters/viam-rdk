@@ -1,6 +1,4 @@
 # Binaries for programs and plugins
-*.exe
-*.exe~
 *.dll
 *.so
 *.dylib
@@ -29,7 +27,6 @@ main
 vendor/
 
 # gRPC/Protocol Buffers
-bin
 dist/*
 node_modules/
 docs/
@@ -56,7 +53,6 @@ data.ndjson
 
 out/
 .idea/*
-bin/
 
 # artifact
 .artifact/cache
