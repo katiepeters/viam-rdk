@@ -30,7 +30,7 @@ build-go:
 GO_FILES=$(shell find . -name "*.go")
 
 GOOS ?= $(shell go env GOOS)
-GOARCH = amd64
+GOARCH ?= $(shell go env GOARCH)
 bin/$(GOOS)-$(GOARCH)/viam-cli: $(GO_FILES) Makefile go.mod go.sum
 	# no_cgo necessary here because of motionplan -> nlopt dependency.
 	# can be removed if you can run CGO_ENABLED=0 go build ./cli/viam on your local machine.
@@ -93,8 +93,8 @@ full-static:
 
 windows:
 	mkdir -p bin/windows
-	GOOS=windows go build -tags no_cgo $(GCFLAGS) -ldflags="-extldflags=-static $(COMMON_LDFLAGS)" -o bin/windows/viam-server-amd64.exe ./web/cmd/server
-	cd bin/windows && zip viam.zip viam-server-amd64.exe
+	GOOS=windows go build -tags no_cgo $(GCFLAGS) -ldflags="-extldflags=-static $(COMMON_LDFLAGS)" -o bin/windows/viam-server-$(shell go env GOARCH).exe ./web/cmd/server
+	cd bin/windows && zip viam.zip viam-server-$(shell go env GOARCH).exe
 
 server-static-compressed: server-static
 	upx --best --lzma $(BIN_OUTPUT_PATH)/viam-server
@@ -129,3 +129,40 @@ ffmpeg: $(FFMPEG_ROOT)
 
 
 include *.make
+
+# Build for all major platforms
+.PHONY: build-all
+build-all: build-all-cli build-all-server
+
+.PHONY: build-all-cli
+build-all-cli:
+	@echo "Building CLI for all platforms..."
+	GOOS=linux GOARCH=amd64 make cli
+	GOOS=linux GOARCH=arm64 make cli
+	GOOS=darwin GOARCH=amd64 make cli
+	GOOS=darwin GOARCH=arm64 make cli
+	GOOS=windows GOARCH=amd64 EXE_SUFFIX=.exe make cli
+	@echo "CLI builds complete for all platforms"
+
+.PHONY: build-all-server
+build-all-server:
+	@echo "Building server for all platforms..."
+	# Linux builds
+	GOOS=linux GOARCH=amd64 go build -tags no_cgo $(GCFLAGS) $(LDFLAGS) -o bin/linux-amd64/viam-server web/cmd/server/main.go
+	GOOS=linux GOARCH=arm64 go build -tags no_cgo $(GCFLAGS) $(LDFLAGS) -o bin/linux-arm64/viam-server web/cmd/server/main.go
+	# macOS builds
+	GOOS=darwin GOARCH=amd64 go build -tags no_cgo $(GCFLAGS) $(LDFLAGS) -o bin/darwin-amd64/viam-server web/cmd/server/main.go
+	GOOS=darwin GOARCH=arm64 go build -tags no_cgo $(GCFLAGS) $(LDFLAGS) -o bin/darwin-arm64/viam-server web/cmd/server/main.go
+	# Windows build
+	GOOS=windows GOARCH=amd64 go build -tags no_cgo $(GCFLAGS) $(LDFLAGS) -o bin/windows-amd64/viam-server.exe web/cmd/server/main.go
+	@echo "Server builds complete for all platforms"
+
+.PHONY: build-all-static
+build-all-static:
+	# Windows static build (using Go's built-in static linking)
+	GOOS=windows GOARCH=amd64 go build -tags no_cgo,osusergo,netgo $(GCFLAGS) -ldflags="-extldflags=-static $(COMMON_LDFLAGS)" -o bin/windows-amd64/viam-server-static.exe web/cmd/server/main.go
+	@echo "Static server builds complete for all platforms"
+
+.PHONY: clean-all-platforms
+clean-all-platforms:
+	rm -rf bin/linux-amd64 bin/linux-arm64 bin/darwin-amd64 bin/darwin-arm64 bin/windows-amd64
