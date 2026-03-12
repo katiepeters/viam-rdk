@@ -762,7 +762,9 @@ func (d *DataClient) CreateBinaryDataSignedURL(ctx context.Context, binaryDataID
 // If provided, only data matching the filter will be deleted.
 // If omitted, data is deleted based on organizationID and deleteOlderThanDays.
 // Returns the number of tabular datapoints deleted.
-func (d *DataClient) DeleteTabularData(ctx context.Context, organizationID string, deleteOlderThanDays int, filter *pb.DeleteTabularFilter) (int, error) {
+func (d *DataClient) DeleteTabularData(
+	ctx context.Context, organizationID string, deleteOlderThanDays int, filter *pb.DeleteTabularFilter,
+) (int, error) {
 	resp, err := d.dataClient.DeleteTabularData(ctx, &pb.DeleteTabularDataRequest{
 		OrganizationId:      organizationID,
 		DeleteOlderThanDays: uint32(deleteOlderThanDays),
