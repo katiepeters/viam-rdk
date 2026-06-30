@@ -172,6 +172,18 @@ type DataCaptureConfig struct {
 	Disabled           bool                   `json:"disabled"`
 	Tags               []string               `json:"tags,omitempty"`
 	CaptureDirectory   string                 `json:"capture_directory"`
+	// Pipelines are aggregation pipelines that run against this capture method's data.
+	Pipelines []CaptureMethodPipeline `json:"pipelines,omitempty"`
+}
+
+// CaptureMethodPipeline configures a named aggregation pipeline attached to a capture method.
+type CaptureMethodPipeline struct {
+	// Name identifies the pipeline; also used as the virtual sensor name for results.
+	Name string `json:"name"`
+	// Schedule is a Go duration string (e.g. "5m") controlling how often the pipeline runs.
+	Schedule string `json:"schedule"`
+	// Stages is the sequence of MongoDB aggregation stages to execute.
+	Stages []map[string]interface{} `json:"stages"`
 }
 
 // Equals checks if one capture config is equal to another.
@@ -184,7 +196,8 @@ func (c *DataCaptureConfig) Equals(other *DataCaptureConfig) bool {
 		c.Disabled == other.Disabled &&
 		slices.Compare(c.Tags, other.Tags) == 0 &&
 		reflect.DeepEqual(c.AdditionalParams, other.AdditionalParams) &&
-		c.CaptureDirectory == other.CaptureDirectory
+		c.CaptureDirectory == other.CaptureDirectory &&
+		reflect.DeepEqual(c.Pipelines, other.Pipelines)
 }
 
 // ShouldSyncKey is a special key we use within a modular sensor to pass a boolean

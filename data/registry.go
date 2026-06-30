@@ -1,6 +1,7 @@
 package data
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"time"
@@ -33,6 +34,10 @@ type CollectorParams struct {
 	MongoCollection *mongo.Collection
 	QueueSize       int
 	Target          CaptureBufferedWriter
+	// TabularObserver, if set, is called for each tabular reading immediately after
+	// capture. Pipeline runners use this to receive data before .capture files are
+	// synced and deleted from disk.
+	TabularObserver func(ctx context.Context, doc TabularDataBson)
 }
 
 // Validate validates that p contains all required parameters.

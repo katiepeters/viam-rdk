@@ -82,6 +82,7 @@ type collector struct {
 	target           CaptureBufferedWriter
 	lastLoggedErrors map[string]int64
 	dataType         CaptureType
+	tabularObserver  func(ctx context.Context, doc TabularDataBson)
 }
 
 // Close closes the channels backing the Collector. It should always be called before disposing of a Collector to avoid
@@ -256,6 +257,7 @@ func NewCollector(captureFunc CaptureFunc, params CollectorParams) (Collector, e
 		componentType:    params.ComponentType,
 		methodName:       params.MethodName,
 		mongoCollection:  params.MongoCollection,
+		tabularObserver:  params.TabularObserver,
 		captureResults:   make(chan CaptureResult, params.QueueSize),
 		captureErrors:    make(chan error, params.QueueSize),
 		dataType:         params.DataType,
@@ -314,8 +316,33 @@ func (c *collector) writeCaptureResults() {
 			}
 
 			c.maybeWriteToMongo(msg)
+			c.maybeNotifyTabularObserver(msg)
 		}
 	}
+}
+
+// maybeNotifyTabularObserver calls the tabularObserver if set and the result is tabular.
+func (c *collector) maybeNotifyTabularObserver(msg CaptureResult) {
+	if c.tabularObserver == nil || msg.Type != CaptureTypeTabular {
+		return
+	}
+	s := msg.TabularData.Payload
+	if s == nil {
+		return
+	}
+	bsonData, err := pbStructToBSON(s)
+	if err != nil {
+		c.logger.Error(errors.Wrap(err, "pipeline observer: failed to convert to bson"))
+		return
+	}
+	c.tabularObserver(c.cancelCtx, TabularDataBson{
+		TimeRequested: msg.TimeRequested,
+		TimeReceived:  msg.TimeReceived,
+		ComponentName: c.componentName,
+		ComponentType: c.componentType,
+		MethodName:    c.methodName,
+		Data:          bsonData,
+	})
 }
 
 // maybeWriteToMongo will write to the mongoCollection
