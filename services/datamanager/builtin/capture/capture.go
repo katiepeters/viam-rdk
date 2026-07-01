@@ -67,8 +67,12 @@ type Capture struct {
 	mongoMU            sync.Mutex
 	mongo              captureMongo
 
-	// pipelineObservers provides tabular observers wired to the robot-level pipeline manager.
-	pipelineObservers PipelineObservers
+	// aggregation sensor management: mongod lifecycle and per-source collection wiring.
+	aggMu      sync.Mutex
+	aggSensors map[string][]aggregationSensorDep // key: aggCollectionKey(component, method)
+	aggCancel  context.CancelFunc
+	aggClient  *mongo.Client
+	aggProc    *mongodProcess
 
 	// defaultCollectorConfigs are the default as specified in the machine config.
 	// These are stored in order to be compared to any capture override readings.
@@ -233,7 +237,6 @@ func (c *Capture) Reconfigure(
 	collectorConfigsByResource CollectorConfigsByResource,
 	resourcesByShortName map[string]resource.Resource,
 	config Config,
-	pipelineObservers PipelineObservers,
 ) {
 	c.logger.Debug("Reconfigure START")
 	defer c.logger.Debug("Reconfigure END")
@@ -256,7 +259,7 @@ func (c *Capture) Reconfigure(
 		c.logger.Infof("maximum_capture_file_size_bytes old: %d, new: %d", c.maxCaptureFileSize, config.MaximumCaptureFileSizeBytes)
 	}
 
-	c.pipelineObservers = pipelineObservers
+	c.reconfigureAggSensors(ctx, resourcesByShortName)
 
 	collection := c.mongoReconfigure(ctx, config.MongoConfig)
 	newCollectors := c.newCollectors(collectorConfigsByResource, config, collection)
@@ -282,6 +285,7 @@ func (c *Capture) Close(ctx context.Context) {
 	c.flushOpenSequences()
 	c.FlushCollectors()
 	c.closeCollectors()
+	c.teardownAggSensors(ctx)
 
 	c.mongoMU.Lock()
 	defer c.mongoMU.Unlock()
@@ -387,8 +391,19 @@ func (c *Capture) buildCollector(
 		collectorConfig.Tags,
 	)
 	var tabularObserver func(ctx context.Context, doc data.TabularDataBson)
-	if c.pipelineObservers != nil {
-		tabularObserver = c.pipelineObservers.ObserverFor(md.ResourceName, md.MethodMetadata.MethodName)
+	c.aggMu.Lock()
+	sensorList := c.aggSensors[aggCollectionKey(md.ResourceName, md.MethodMetadata.MethodName)]
+	c.aggMu.Unlock()
+	if len(sensorList) > 0 {
+		observers := make([]func(context.Context, data.TabularDataBson), len(sensorList))
+		for i, s := range sensorList {
+			observers[i] = s.TabularObserver()
+		}
+		tabularObserver = func(ctx context.Context, doc data.TabularDataBson) {
+			for _, obs := range observers {
+				obs(ctx, doc)
+			}
+		}
 	}
 
 	queueSize := defaultIfZeroVal(collectorConfig.CaptureQueueSize, defaultCaptureQueueSize)
@@ -500,4 +515,134 @@ func defaultIfZeroVal[T comparable](val, defaultVal T) T {
 		return defaultVal
 	}
 	return val
+}
+
+func aggCollectionKey(component, method string) string {
+	return component + "/" + method
+}
+
+// reconfigureAggSensors finds aggregation sensors in resourcesByShortName, tears down any
+// existing mongod, and starts a background goroutine that brings up mongod and injects
+// the appropriate *mongo.Collection into each sensor.
+func (c *Capture) reconfigureAggSensors(ctx context.Context, resourcesByShortName map[string]resource.Resource) {
+	newSensors := map[string][]aggregationSensorDep{}
+	for _, res := range resourcesByShortName {
+		if agg, ok := res.(aggregationSensorDep); ok {
+			key := aggCollectionKey(agg.SourceComponent(), agg.SourceMethod())
+			newSensors[key] = append(newSensors[key], agg)
+		}
+	}
+
+	c.aggMu.Lock()
+	// Skip restart if sources are unchanged and mongod is already running.
+	if c.aggCancel != nil && aggSensorsUnchanged(c.aggSensors, newSensors) {
+		c.aggMu.Unlock()
+		return
+	}
+	oldCancel := c.aggCancel
+	oldClient := c.aggClient
+	oldProc := c.aggProc
+	c.aggCancel = nil
+	c.aggClient = nil
+	c.aggProc = nil
+	c.aggSensors = newSensors
+	c.aggMu.Unlock()
+
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if oldClient != nil {
+		goutils.UncheckedError(oldClient.Disconnect(ctx))
+	}
+	if oldProc != nil {
+		oldProc.stop()
+	}
+
+	if len(newSensors) == 0 {
+		return
+	}
+
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	c.aggMu.Lock()
+	c.aggCancel = bgCancel
+	sensorsSnap := newSensors
+	c.aggMu.Unlock()
+
+	go func() {
+		binPath := mongodBinPath()
+		dataDir := mongodDataDir()
+
+		if err := ensureMongodBinary(bgCtx, binPath, c.logger); err != nil {
+			if bgCtx.Err() == nil {
+				c.logger.Warnf("aggregation: ensure mongod binary: %v", err)
+			}
+			return
+		}
+		if bgCtx.Err() != nil {
+			return
+		}
+
+		proc, client, err := launchMongod(bgCtx, binPath, dataDir, c.logger)
+		if err != nil {
+			if bgCtx.Err() == nil {
+				c.logger.Warnf("aggregation: launch mongod: %v", err)
+			}
+			return
+		}
+
+		c.aggMu.Lock()
+		if bgCtx.Err() != nil {
+			c.aggMu.Unlock()
+			goutils.UncheckedError(client.Disconnect(context.Background()))
+			proc.stop()
+			return
+		}
+		c.aggClient = client
+		c.aggProc = proc
+		c.aggMu.Unlock()
+
+		db := client.Database("aggregations")
+		i := 0
+		for _, sensors := range sensorsSnap {
+			coll := db.Collection(fmt.Sprintf("c%d", i))
+			i++
+			for _, s := range sensors {
+				s.SetCollection(coll)
+			}
+		}
+	}()
+}
+
+// teardownAggSensors cancels the background goroutine and shuts down mongod.
+func (c *Capture) teardownAggSensors(ctx context.Context) {
+	c.aggMu.Lock()
+	aggCancel := c.aggCancel
+	aggClient := c.aggClient
+	aggProc := c.aggProc
+	c.aggCancel = nil
+	c.aggClient = nil
+	c.aggProc = nil
+	c.aggMu.Unlock()
+
+	if aggCancel != nil {
+		aggCancel()
+	}
+	if aggClient != nil {
+		goutils.UncheckedError(aggClient.Disconnect(ctx))
+	}
+	if aggProc != nil {
+		aggProc.stop()
+	}
+}
+
+func aggSensorsUnchanged(old, new map[string][]aggregationSensorDep) bool {
+	if len(old) != len(new) {
+		return false
+	}
+	for key, newList := range new {
+		if len(old[key]) != len(newList) {
+			return false
+		}
+	}
+	return true
 }

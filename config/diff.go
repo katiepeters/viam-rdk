@@ -24,9 +24,8 @@ type Diff struct {
 	NetworkEqual        bool
 	TracingEqual        bool
 	LogEqual            bool
-	JobsEqual           bool
-	PipelinesEqual      bool
-	PrettyDiff          string
+	JobsEqual  bool
+	PrettyDiff string
 	UnmodifiedResources []resource.Config
 }
 
@@ -38,8 +37,7 @@ type ModifiedConfigDiff struct {
 	Services   []resource.Config
 	Packages   []PackageConfig
 	Modules    []Module
-	Jobs       []JobConfig
-	Pipelines  []PipelineConfig
+	Jobs []JobConfig
 }
 
 // NewRevision returns the revision from the new config if available.
@@ -94,9 +92,6 @@ func DiffConfigs(left, right Config, revealSensitiveConfigDiffs bool) (_ *Diff, 
 
 	jobsDifferent := diffJobCfg(left.Jobs, right.Jobs, &diff)
 	diff.JobsEqual = !jobsDifferent
-
-	pipelinesDifferent := diffPipelineCfg(left.Pipelines, right.Pipelines, &diff)
-	diff.PipelinesEqual = !pipelinesDifferent
 
 	networkDifferent := diffNetworkingCfg(&left, &right)
 	diff.NetworkEqual = !networkDifferent
@@ -576,43 +571,3 @@ func diffJob(left, right JobConfig, diff *Diff) bool {
 	return true
 }
 
-func diffPipelineCfg(leftPipelines, rightPipelines []PipelineConfig, diff *Diff) bool {
-	leftIndex := make(map[string]int)
-	leftP := make(map[string]PipelineConfig)
-	for idx, l := range leftPipelines {
-		leftP[l.Name] = l
-		leftIndex[l.Name] = idx
-	}
-
-	var removed []int
-	var different bool
-	for _, r := range rightPipelines {
-		l, ok := leftP[r.Name]
-		delete(leftP, r.Name)
-		if ok {
-			different = diffPipeline(l, r, diff) || different
-			continue
-		}
-		diff.Added.Pipelines = append(diff.Added.Pipelines, r)
-		different = true
-	}
-
-	for k := range leftP {
-		removed = append(removed, leftIndex[k])
-		different = true
-	}
-	sort.Ints(removed)
-	for _, idx := range removed {
-		diff.Removed.Pipelines = append(diff.Removed.Pipelines, leftPipelines[idx])
-	}
-
-	return different
-}
-
-func diffPipeline(left, right PipelineConfig, diff *Diff) bool {
-	if left.Equals(right) {
-		return false
-	}
-	diff.Modified.Pipelines = append(diff.Modified.Pipelines, right)
-	return true
-}

@@ -1,4 +1,4 @@
-package pipelinemanager
+package capture
 
 import (
 	"archive/tar"
@@ -24,7 +24,7 @@ import (
 
 const (
 	mongodVersion      = "7.0.14"
-	pipelineMongodPort = 27018
+	aggMongodPort      = 27018
 )
 
 func mongodBinPath() string {
@@ -59,7 +59,7 @@ func ensureMongodBinary(ctx context.Context, destPath string, logger logging.Log
 	if err != nil {
 		return err
 	}
-	logger.Infof("pipeline: downloading mongod %s", mongodVersion)
+	logger.Infof("aggregation: downloading mongod %s", mongodVersion)
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o700); err != nil {
 		return fmt.Errorf("create bin dir: %w", err)
 	}
@@ -111,7 +111,7 @@ func extractMongodBinary(r io.Reader, destPath string) error {
 	}
 }
 
-// mongodProcess manages a mongod child process started by viam-server for pipeline execution.
+// mongodProcess manages a mongod child process started by viam-server for aggregation sensors.
 type mongodProcess struct {
 	cmd    *exec.Cmd
 	logger logging.Logger
@@ -129,7 +129,7 @@ func launchMongod(ctx context.Context, binPath, dataDir string, logger logging.L
 	}
 	cmd := exec.Command(binPath,
 		"--dbpath", dataDir,
-		"--port", fmt.Sprintf("%d", pipelineMongodPort),
+		"--port", fmt.Sprintf("%d", aggMongodPort),
 		"--bind_ip", "127.0.0.1",
 		"--noauth",
 	)
@@ -147,12 +147,12 @@ func launchMongod(ctx context.Context, binPath, dataDir string, logger logging.L
 		proc.stop()
 		return nil, nil, fmt.Errorf("mongod ready: %w", err)
 	}
-	logger.Infof("pipeline: mongod ready on port %d", pipelineMongodPort)
+	logger.Infof("aggregation: mongod ready on port %d", aggMongodPort)
 	return proc, client, nil
 }
 
 func (p *mongodProcess) waitReady(ctx context.Context) (*mongo.Client, error) {
-	uri := fmt.Sprintf("mongodb://127.0.0.1:%d/?directConnection=true", pipelineMongodPort)
+	uri := fmt.Sprintf("mongodb://127.0.0.1:%d/?directConnection=true", aggMongodPort)
 	client, err := mongo.Connect(ctx, options.Client().
 		ApplyURI(uri).
 		SetServerSelectionTimeout(30*time.Second))
@@ -171,7 +171,7 @@ func (p *mongodProcess) stop() {
 		return
 	}
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		p.logger.Warnf("pipeline: SIGTERM mongod: %v", err)
+		p.logger.Warnf("aggregation: SIGTERM mongod: %v", err)
 		_ = p.cmd.Process.Kill()
 	}
 	done := make(chan struct{})
@@ -182,7 +182,7 @@ func (p *mongodProcess) stop() {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		p.logger.Warn("pipeline: mongod did not exit in 5s, killing")
+		p.logger.Warn("aggregation: mongod did not exit in 5s, killing")
 		_ = p.cmd.Process.Kill()
 		<-done
 	}

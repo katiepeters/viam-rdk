@@ -55,7 +55,6 @@ import (
 	"go.viam.com/rdk/robot/client"
 	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/robot/jobmanager"
-	"go.viam.com/rdk/robot/pipelinemanager"
 	"go.viam.com/rdk/robot/packages"
 	"go.viam.com/rdk/robot/web"
 	weboptions "go.viam.com/rdk/robot/web/options"
@@ -97,9 +96,8 @@ type localRobot struct {
 	operations              *operation.Manager
 	sessionManager          session.Manager
 	packageManager          packages.ManagerSyncer
-	jobManager              *jobmanager.JobManager
-	pipelineManager         *pipelinemanager.PipelineManager
-	localPackages           packages.ManagerSyncer
+	jobManager    *jobmanager.JobManager
+	localPackages packages.ManagerSyncer
 	cloudConnSvc            icloud.ConnectionService
 	logger                  logging.Logger
 	activeBackgroundWorkers sync.WaitGroup
@@ -288,9 +286,6 @@ func (r *localRobot) Close(ctx context.Context) error {
 	}
 	if r.jobManager != nil {
 		err = multierr.Combine(err, r.jobManager.Close())
-	}
-	if r.pipelineManager != nil {
-		err = multierr.Combine(err, r.pipelineManager.Close(ctx))
 	}
 	if r.webSvc != nil {
 		err = multierr.Combine(err, r.webSvc.Close(ctx))
@@ -674,13 +669,6 @@ func newWithResources(
 		r.logger.CErrorw(ctx, "Job manager failed to start", "error", err)
 	}
 	r.jobManager = jobManager
-
-	r.pipelineManager = pipelinemanager.New(logger.Sublogger("pipeline_manager"))
-	if err := r.manager.resources.AddNode(
-		pipelinemanager.InternalServiceName,
-		resource.NewConfiguredGraphNode(resource.Config{}, r.pipelineManager, builtinModel)); err != nil {
-		r.logger.CErrorw(ctx, "Failed to add pipeline manager to resource graph", "error", err)
-	}
 
 	r.reconfigure(ctx, cfg, false)
 
@@ -1909,26 +1897,6 @@ func (r *localRobot) reconfigure(ctx context.Context, newConfig *config.Config, 
 
 	if r.manager.moduleManager != nil {
 		r.manager.moduleManager.ClearFailedModules()
-	}
-
-	if !diff.PipelinesEqual && r.pipelineManager != nil {
-		r.pipelineManager.UpdatePipelines(diff.Right.Pipelines)
-		// Force any data manager service to reconfigure so it re-wires pipeline observers.
-		for _, svc := range diff.Right.Services {
-			if svc.API == datamanager.API {
-				alreadyModified := false
-				for _, mod := range diff.Modified.Services {
-					if mod.ResourceName() == svc.ResourceName() {
-						alreadyModified = true
-						break
-					}
-				}
-				if !alreadyModified {
-					diff.Modified.Services = append(diff.Modified.Services, svc)
-					diff.ResourcesEqual = false
-				}
-			}
-		}
 	}
 
 	if diff.ResourcesEqual {
