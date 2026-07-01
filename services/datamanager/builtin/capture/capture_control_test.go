@@ -304,6 +304,7 @@ func TestNearZeroFrequencySkipsCollector(t *testing.T) {
 		CollectorConfigsByResource{fakeRes: []datamanager.DataCaptureConfig{fakeCfg}},
 		nil,
 		Config{MaximumCaptureFileSizeBytes: 256 * 1024, CaptureDir: t.TempDir()},
+		nil,
 	)
 
 	test.That(t, len(c.collectors), test.ShouldEqual, 0)
@@ -385,6 +386,7 @@ func TestMaxCaptureFileSize(t *testing.T) {
 					CollectorConfigsByResource{fakeRes: []datamanager.DataCaptureConfig{fakeCfg}},
 					nil,
 					Config{MaximumCaptureFileSizeBytes: maxSize, CaptureDir: captureDir},
+					nil,
 				)
 			}
 

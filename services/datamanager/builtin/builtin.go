@@ -30,6 +30,7 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/robot/framesystem"
+	"go.viam.com/rdk/robot/pipelinemanager"
 	"go.viam.com/rdk/services/datamanager"
 	"go.viam.com/rdk/services/datamanager/builtin/capture"
 	"go.viam.com/rdk/services/datamanager/builtin/shared"
@@ -240,7 +241,14 @@ func (b *builtIn) BuiltInReconfigure(ctx context.Context, deps resource.Dependen
 	}
 
 	b.diskSummaryTracker.reconfigure(syncConfig.SyncPaths(), syncConfig.SyncIntervalMins, shouldSync)
-	b.capture.Reconfigure(ctx, frameSystem, collectorConfigsByResource, resourcesByShortName, captureConfig)
+	var pipelineObs capture.PipelineObservers
+	if pmRes, ok := deps[pipelinemanager.InternalServiceName]; ok {
+		if pm, ok := pmRes.(*pipelinemanager.PipelineManager); ok {
+			pm.SetCaptureDir(captureConfig.CaptureDir)
+			pipelineObs = pm
+		}
+	}
+	b.capture.Reconfigure(ctx, frameSystem, collectorConfigsByResource, resourcesByShortName, captureConfig, pipelineObs)
 	b.sync.Reconfigure(ctx, syncConfig, cloudConnSvc)
 
 	if controlSensor != nil && !captureConfig.CaptureDisabled {

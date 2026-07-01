@@ -67,13 +67,8 @@ type Capture struct {
 	mongoMU            sync.Mutex
 	mongo              captureMongo
 
-	// pipelineMu protects all pipeline-related fields below.
-	pipelineMu          sync.Mutex
-	pipelineWorkers     []*pipelineWorker
-	pipelineBgCancel    context.CancelFunc
-	pipelineMongoClient *mongo.Client
-	pipelineProc        *mongodProcess
-	lazyCollections     map[collectorMetadata]*lazyCollection
+	// pipelineObservers provides tabular observers wired to the robot-level pipeline manager.
+	pipelineObservers PipelineObservers
 
 	// defaultCollectorConfigs are the default as specified in the machine config.
 	// These are stored in order to be compared to any capture override readings.
@@ -238,6 +233,7 @@ func (c *Capture) Reconfigure(
 	collectorConfigsByResource CollectorConfigsByResource,
 	resourcesByShortName map[string]resource.Resource,
 	config Config,
+	pipelineObservers PipelineObservers,
 ) {
 	c.logger.Debug("Reconfigure START")
 	defer c.logger.Debug("Reconfigure END")
@@ -260,8 +256,7 @@ func (c *Capture) Reconfigure(
 		c.logger.Infof("maximum_capture_file_size_bytes old: %d, new: %d", c.maxCaptureFileSize, config.MaximumCaptureFileSizeBytes)
 	}
 
-	// Pipelines must be set up before collectors so buildCollector can attach the observer.
-	c.reconfigurePipelines(ctx, collectorConfigsByResource, config.CaptureDir)
+	c.pipelineObservers = pipelineObservers
 
 	collection := c.mongoReconfigure(ctx, config.MongoConfig)
 	newCollectors := c.newCollectors(collectorConfigsByResource, config, collection)
@@ -282,149 +277,11 @@ func (c *Capture) Reconfigure(
 	c.maxCaptureFileSize = config.MaximumCaptureFileSizeBytes
 }
 
-// reconfigurePipelines tears down any running pipeline infrastructure and starts fresh.
-// Lazy collections are created immediately so buildCollector can attach observers before
-// mongod is ready; the actual mongod start and worker launch happen in a background goroutine.
-// Must be called before newCollectors.
-func (c *Capture) reconfigurePipelines(
-	ctx context.Context,
-	collectorCfgs CollectorConfigsByResource,
-	captureDir string,
-) {
-	c.pipelineMu.Lock()
-	defer c.pipelineMu.Unlock()
-
-	if c.pipelineBgCancel != nil {
-		c.pipelineBgCancel()
-		c.pipelineBgCancel = nil
-	}
-	if len(c.pipelineWorkers) > 0 {
-		stopPipelineWorkers(c.pipelineWorkers)
-		c.pipelineWorkers = nil
-	}
-	if c.pipelineMongoClient != nil {
-		goutils.UncheckedError(c.pipelineMongoClient.Disconnect(ctx))
-		c.pipelineMongoClient = nil
-	}
-	if c.pipelineProc != nil {
-		c.pipelineProc.stop()
-		c.pipelineProc = nil
-	}
-	c.lazyCollections = nil
-
-	type methodWithPipelines struct {
-		md   collectorMetadata
-		cfgs []datamanager.CaptureMethodPipeline
-	}
-	var methods []methodWithPipelines
-	for _, dcCfgs := range collectorCfgs {
-		for _, dcCfg := range dcCfgs {
-			if len(dcCfg.Pipelines) == 0 {
-				continue
-			}
-			methods = append(methods, methodWithPipelines{
-				md:   newCollectorMetadata(dcCfg),
-				cfgs: dcCfg.Pipelines,
-			})
-		}
-	}
-	if len(methods) == 0 {
-		return
-	}
-
-	c.lazyCollections = make(map[collectorMetadata]*lazyCollection, len(methods))
-	for _, m := range methods {
-		c.lazyCollections[m.md] = &lazyCollection{}
-	}
-
-	bgCtx, bgCancel := context.WithCancel(context.Background())
-	c.pipelineBgCancel = bgCancel
-	lazySnap := c.lazyCollections
-
-	go func() {
-		binPath := mongodBinPath()
-		dataDir := mongodDataDir()
-
-		if err := ensureMongodBinary(bgCtx, binPath, c.logger); err != nil {
-			if bgCtx.Err() == nil {
-				c.logger.Warnf("pipeline: %v", err)
-			}
-			return
-		}
-		if bgCtx.Err() != nil {
-			return
-		}
-
-		proc, client, err := launchMongod(bgCtx, binPath, dataDir, c.logger)
-		if err != nil {
-			if bgCtx.Err() == nil {
-				c.logger.Warnf("pipeline: %v", err)
-			}
-			return
-		}
-
-		c.pipelineMu.Lock()
-		if bgCtx.Err() != nil {
-			c.pipelineMu.Unlock()
-			goutils.UncheckedError(client.Disconnect(context.Background()))
-			proc.stop()
-			return
-		}
-		c.pipelineProc = proc
-		c.pipelineMongoClient = client
-		c.pipelineMu.Unlock()
-
-		db := client.Database("pipelines")
-		var workers []*pipelineWorker
-		for i, m := range methods {
-			coll := db.Collection(fmt.Sprintf("c%d", i))
-			lazySnap[m.md].set(coll)
-			tracker := newPipelineProgressTracker(len(m.cfgs))
-			w := startPipelineWorkers(bgCtx, m.cfgs, coll, tracker, captureDir, m.md.ResourceName, c.logger)
-			workers = append(workers, w...)
-		}
-
-		c.pipelineMu.Lock()
-		if bgCtx.Err() == nil {
-			c.pipelineWorkers = append(c.pipelineWorkers, workers...)
-		} else {
-			stopPipelineWorkers(workers)
-		}
-		c.pipelineMu.Unlock()
-	}()
-}
-
 // Close closes the capture manager.
 func (c *Capture) Close(ctx context.Context) {
-	// Cancel background setup goroutine and stop pipeline workers.
-	c.pipelineMu.Lock()
-	if c.pipelineBgCancel != nil {
-		c.pipelineBgCancel()
-		c.pipelineBgCancel = nil
-	}
-	if len(c.pipelineWorkers) > 0 {
-		stopPipelineWorkers(c.pipelineWorkers)
-		c.pipelineWorkers = nil
-	}
-	c.pipelineMu.Unlock()
-
-	// Flush and close collectors before stopping mongo so no observer fires
-	// into a disconnected client.
 	c.flushOpenSequences()
 	c.FlushCollectors()
 	c.closeCollectors()
-
-	c.pipelineMu.Lock()
-	if c.pipelineMongoClient != nil {
-		goutils.UncheckedError(c.pipelineMongoClient.Disconnect(ctx))
-		c.pipelineMongoClient = nil
-	}
-	if c.pipelineProc != nil {
-		c.pipelineProc.stop()
-		c.pipelineProc = nil
-	}
-	c.lazyCollections = nil
-	c.pipelineMu.Unlock()
 
 	c.mongoMU.Lock()
 	defer c.mongoMU.Unlock()
@@ -529,22 +386,9 @@ func (c *Capture) buildCollector(
 		methodParams,
 		collectorConfig.Tags,
 	)
-	// If this method has pipelines, attach an observer. The lazyCollection drops
-	// readings silently while mongod is still starting up.
-	c.pipelineMu.Lock()
-	lc := c.lazyCollections[md]
-	c.pipelineMu.Unlock()
 	var tabularObserver func(ctx context.Context, doc data.TabularDataBson)
-	if lc != nil {
-		tabularObserver = func(ctx context.Context, doc data.TabularDataBson) {
-			coll := lc.get()
-			if coll == nil {
-				return
-			}
-			if _, err := coll.InsertOne(ctx, doc); err != nil {
-				c.logger.Warnw("pipeline: failed to write reading to mongo", "error", err)
-			}
-		}
+	if c.pipelineObservers != nil {
+		tabularObserver = c.pipelineObservers.ObserverFor(md.ResourceName, md.MethodMetadata.MethodName)
 	}
 
 	queueSize := defaultIfZeroVal(collectorConfig.CaptureQueueSize, defaultCaptureQueueSize)

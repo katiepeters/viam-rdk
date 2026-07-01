@@ -42,6 +42,7 @@ type Config struct {
 	LogConfig         []logging.LoggerPatternConfig
 	MaintenanceConfig *MaintenanceConfig
 	Jobs              []JobConfig
+	Pipelines         []PipelineConfig
 	Tracing           TracingConfig
 
 	ConfigFilePath string
@@ -134,6 +135,7 @@ type configData struct {
 	MaintenanceConfig       *MaintenanceConfig            `json:"maintenance,omitempty"`
 	DisableLogDeduplication bool                          `json:"disable_log_deduplication"`
 	Jobs                    []JobConfig                   `json:"jobs,omitempty"`
+	Pipelines               []PipelineConfig              `json:"pipelines,omitempty"`
 	Tracing                 TracingConfig                 `json:"tracing,omitempty"`
 }
 
@@ -296,6 +298,7 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	c.MaintenanceConfig = conf.MaintenanceConfig
 	c.DisableLogDeduplication = conf.DisableLogDeduplication
 	c.Jobs = conf.Jobs
+	c.Pipelines = conf.Pipelines
 	c.Tracing = conf.Tracing
 
 	return nil
@@ -327,6 +330,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		MaintenanceConfig:       c.MaintenanceConfig,
 		DisableLogDeduplication: c.DisableLogDeduplication,
 		Jobs:                    c.Jobs,
+		Pipelines:               c.Pipelines,
 		Tracing:                 c.Tracing,
 	})
 }
@@ -1323,4 +1327,24 @@ func (jc *JobConfig) Validate(path string) error {
 // Equals checks if the two configs are deeply equal to each other.
 func (jc JobConfig) Equals(other JobConfig) bool {
 	return reflect.DeepEqual(jc, other)
+}
+
+// PipelineConfig describes a named aggregation pipeline that runs against captured
+// data from a specific component on a schedule.
+type PipelineConfig struct {
+	// Name identifies the pipeline; used as the virtual sensor name for results.
+	Name string `json:"name"`
+	// Component is the short name of the component whose captured data this pipeline reads.
+	Component string `json:"component"`
+	// Method is the capture method name (e.g. "Readings") whose data this pipeline reads.
+	Method string `json:"method"`
+	// Schedule is a Go duration string (e.g. "5m") controlling how often the pipeline runs.
+	Schedule string `json:"schedule"`
+	// Stages is the sequence of MongoDB aggregation stages to execute.
+	Stages []map[string]interface{} `json:"stages"`
+}
+
+// Equals checks if the two configs are deeply equal to each other.
+func (pc PipelineConfig) Equals(other PipelineConfig) bool {
+	return reflect.DeepEqual(pc, other)
 }

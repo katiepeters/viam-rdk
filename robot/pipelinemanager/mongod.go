@@ -1,4 +1,4 @@
-package capture
+package pipelinemanager
 
 import (
 	"archive/tar"
@@ -51,7 +51,6 @@ func mongodDownloadURL() (string, error) {
 }
 
 // ensureMongodBinary downloads the mongod binary to destPath if it is not already present.
-// The binary is extracted from the official MongoDB Community tarball for the current platform.
 func ensureMongodBinary(ctx context.Context, destPath string, logger logging.Logger) error {
 	if _, err := os.Stat(destPath); err == nil {
 		return nil
@@ -113,14 +112,12 @@ func extractMongodBinary(r io.Reader, destPath string) error {
 }
 
 // mongodProcess manages a mongod child process started by viam-server for pipeline execution.
-// The binary lives at ~/.viam/bin/mongod so viam knows it owns it.
 type mongodProcess struct {
 	cmd    *exec.Cmd
 	logger logging.Logger
 }
 
 // launchMongod starts a mongod process and waits for it to accept connections.
-// Returns the process handle and a connected *mongo.Client.
 func launchMongod(ctx context.Context, binPath, dataDir string, logger logging.Logger) (*mongodProcess, *mongo.Client, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create mongod data dir: %w", err)
@@ -142,7 +139,7 @@ func launchMongod(ctx context.Context, binPath, dataDir string, logger logging.L
 		logFile.Close() //nolint:errcheck
 		return nil, nil, fmt.Errorf("start mongod: %w", err)
 	}
-	logFile.Close() //nolint:errcheck // child inherited the fd
+	logFile.Close() //nolint:errcheck
 
 	proc := &mongodProcess{cmd: cmd, logger: logger}
 	client, err := proc.waitReady(ctx)
