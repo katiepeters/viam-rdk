@@ -14,9 +14,13 @@ import (
 
 const (
 	// sequenceTabularDir is the subdirectory under the destination that holds one NDJSON file
-	// per resource the sequence references. Binary data lands alongside it in data/ and
-	// metadata/, matching the layout `data export binary` writes.
+	// per resource the sequence references.
 	sequenceTabularDir = "tabular"
+
+	// sequenceBinaryExportDir is the subdirectory under the destination that binary data is
+	// rooted at, so it sits alongside tabular/ rather than at the top level. `data export
+	// binary`'s data/ and metadata/ layout is written beneath it.
+	sequenceBinaryExportDir = "binary"
 
 	// defaultSequenceParallelDownloads mirrors the default of the --parallel flag so callers
 	// that leave it unset still get a worker pool.
@@ -153,14 +157,17 @@ func sanitizeForFileName(s string) string {
 	return strings.Trim(unsafeFileNameChars.ReplaceAllString(s, "_"), "_.")
 }
 
-// exportSequenceBinary downloads every binary datum the sequence references into dst, using the
-// same layout and parallel-download machinery as `data export binary`.
+// exportSequenceBinary downloads every binary datum the sequence references into dst/binary,
+// using the same layout and parallel-download machinery as `data export binary`. Rooting it at
+// binary/ keeps it a sibling of tabular/ rather than mixing data/ and metadata/ into the top
+// level of the destination.
 func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst string, parallel, timeout uint) error {
 	if parallel == 0 {
 		parallel = defaultSequenceParallelDownloads
 	}
+	binaryDst := filepath.Join(dst, sequenceBinaryExportDir)
 
-	printf(c.c.Root().Writer, "Downloading binary data for sequence %s", sequenceID)
+	printf(c.c.Root().Writer, "Downloading binary data for sequence %s to %s", sequenceID, binaryDst)
 	return c.performActionOnBinaryDataIDs(ctx,
 		func(ctx context.Context, ids chan<- string) error {
 			defer close(ids)
@@ -174,7 +181,7 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 			})
 		},
 		func(id string) error {
-			return c.downloadBinary(ctx, dst, timeout, id)
+			return c.downloadBinary(ctx, binaryDst, timeout, id)
 		},
 		parallel,
 		func(i int32) {

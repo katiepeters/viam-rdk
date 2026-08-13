@@ -44,6 +44,16 @@ func sequenceResource(name, method string) *datapb.SequenceResourceFilter {
 	return &datapb.SequenceResourceFilter{ResourceName: name, MethodName: method}
 }
 
+func sequenceBinaryMeta(id string) *datapb.BinaryMetadata {
+	return &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
+}
+
+// sequenceBinaryPath is where a sequence-exported binary datum must land: `data export binary`'s
+// data/ layout, rooted under binary/ rather than at the top level of the destination.
+func sequenceBinaryPath(dst, id string) string {
+	return dataFilePath(filepath.Join(dst, sequenceBinaryExportDir), filenameForDownload(sequenceBinaryMeta(id)), ".jpg")
+}
+
 // sequenceExportClient wires an inject.DataServiceClient that serves the given sequence, streams
 // one tabular row per resource, and serves the given binary data records. It returns the client
 // and a pointer to the tabular requests it observed, in call order.
@@ -182,7 +192,7 @@ func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
 	test.That(t, sensorRows[0]["resourceName"], test.ShouldEqual, "sensor-1")
 
 	// --only-tabular means no binary data directory.
-	_, err = os.Stat(filepath.Join(dst, dataDir))
+	_, err = os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
 	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
 }
 
@@ -217,14 +227,19 @@ func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(*tabularRequests), test.ShouldEqual, 0)
 
-	// Binary data uses the same layout as `data export binary`: data/ plus metadata/.
+	// Binary data is rooted at binary/, carrying `data export binary`'s data/ plus metadata/
+	// layout beneath it so nothing lands at the top level of the destination.
 	for _, id := range []string{"bd-1", "bd-2"} {
-		meta := &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
-		fileName := filenameForDownload(meta)
-		test.That(t, mustReadFile(t, dataFilePath(dst, fileName, ".jpg")), test.ShouldResemble, []byte("bytes-"+id))
-		_, err := os.Stat(filepath.Join(dst, metadataDir, fileName+".json"))
+		fileName := filenameForDownload(sequenceBinaryMeta(id))
+		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
+		_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir, metadataDir, fileName+".json"))
 		test.That(t, err, test.ShouldBeNil)
 	}
+	// Nothing may land directly under the destination.
+	_, err = os.Stat(filepath.Join(dst, dataDir))
+	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+	_, err = os.Stat(filepath.Join(dst, metadataDir))
+	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
 }
 
 func TestDataExportSequenceAction_ExportsTabularAndBinaryByDefault(t *testing.T) {
@@ -242,8 +257,7 @@ func TestDataExportSequenceAction_ExportsTabularAndBinaryByDefault(t *testing.T)
 	test.That(t, len(*tabularRequests), test.ShouldEqual, 1)
 	test.That(t, len(readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "camera-1-ReadImage.ndjson"))), test.ShouldEqual, 1)
 
-	fileName := filenameForDownload(&datapb.BinaryMetadata{BinaryDataId: "bd-1", FileName: "bd-1.jpg", FileExt: ".jpg"})
-	test.That(t, mustReadFile(t, dataFilePath(dst, fileName, ".jpg")), test.ShouldResemble, []byte("bytes-bd-1"))
+	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
 }
 
 func TestDataExportSequenceAction_SurfacesTabularErrors(t *testing.T) {
@@ -356,8 +370,7 @@ func TestDataExportSequenceAction_PagesBinaryData(t *testing.T) {
 
 	test.That(t, requestedTokens, test.ShouldResemble, []string{"", "page-2", "page-3"})
 	for _, id := range []string{"bd-1", "bd-2", "bd-3", "bd-4"} {
-		fileName := filenameForDownload(&datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"})
-		test.That(t, mustReadFile(t, dataFilePath(dst, fileName, ".jpg")), test.ShouldResemble, []byte("bytes-"+id))
+		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
 	}
 }
 
@@ -374,8 +387,7 @@ func TestDataExportSequenceAction_DefaultsParallel(t *testing.T) {
 	})
 	test.That(t, err, test.ShouldBeNil)
 
-	fileName := filenameForDownload(&datapb.BinaryMetadata{BinaryDataId: "bd-1", FileName: "bd-1.jpg", FileExt: ".jpg"})
-	test.That(t, mustReadFile(t, dataFilePath(dst, fileName, ".jpg")), test.ShouldResemble, []byte("bytes-bd-1"))
+	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
 }
 
 // TestDataExportSequenceCommandFlags guards that every flag registered on `data export sequence`

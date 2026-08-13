@@ -1443,8 +1443,8 @@ Note: There is no progress meter while copying is in progress.
 							Description: "Downloads everything a single sequence references. For each resource the sequence " +
 								"covers, exports that resource's tabular data over the sequence's capture interval to " +
 								"<destination>/tabular/<resource-name>-<method-name>.ndjson, then downloads the sequence's " +
-								"binary data into <destination>/data and <destination>/metadata, matching the layout of " +
-								"'data export binary'. Use --only-tabular or --only-binary to export just one of the two.",
+								"binary data into <destination>/binary/data and <destination>/binary/metadata, matching the " +
+								"layout of 'data export binary'. Use --only-tabular or --only-binary to export just one of the two.",
 							Flags: []cli.Flag{
 								&cli.StringFlag{
 									Name:      generalFlagDestination,
