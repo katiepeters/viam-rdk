@@ -21,10 +21,6 @@ const (
 	// rooted at, so it sits alongside tabular/ rather than at the top level. `data export
 	// binary`'s data/ and metadata/ layout is written beneath it.
 	sequenceBinaryExportDir = "binary"
-
-	// defaultSequenceParallelDownloads mirrors the default of the --parallel flag so callers
-	// that leave it unset still get a worker pool.
-	defaultSequenceParallelDownloads = 100
 )
 
 // unsafeFileNameChars matches everything we refuse to put in a generated file name. Resource and
@@ -163,7 +159,7 @@ func sanitizeForFileName(s string) string {
 // level of the destination.
 func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst string, parallel, timeout uint) error {
 	if parallel == 0 {
-		parallel = defaultSequenceParallelDownloads
+		parallel = defaultParallelBinaryDownloads
 	}
 	binaryDst := filepath.Join(dst, sequenceBinaryExportDir)
 

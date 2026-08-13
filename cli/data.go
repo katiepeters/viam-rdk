@@ -41,6 +41,11 @@ const (
 	logEveryN     = 100
 	maxLimit      = 100
 
+	// defaultParallelBinaryDownloads backs every --parallel flag, and is the fallback the download
+	// flows apply when handed 0 (a zero-worker pool would never drain its ID channel). Keep the
+	// flag defaults and the fallbacks reading from here so they can't drift apart.
+	defaultParallelBinaryDownloads = 100
+
 	dataCommandAdd    = "add"
 	dataCommandRemove = "remove"
 

@@ -1343,7 +1343,7 @@ Note: There is no progress meter while copying is in progress.
 										&cli.UintFlag{
 											Name:  dataFlagParallelDownloads,
 											Usage: "number of download requests to make in parallel",
-											Value: 100,
+											Value: defaultParallelBinaryDownloads,
 										},
 										&cli.UintFlag{
 											Name:  dataFlagTimeout,
@@ -1465,7 +1465,7 @@ Note: There is no progress meter while copying is in progress.
 								&cli.UintFlag{
 									Name:  dataFlagParallelDownloads,
 									Usage: "number of download requests to make in parallel",
-									Value: 100,
+									Value: defaultParallelBinaryDownloads,
 								},
 								&cli.UintFlag{
 									Name:  dataFlagTimeout,
@@ -1975,7 +1975,7 @@ Note: There is no progress meter while copying is in progress.
 						&cli.UintFlag{
 							Name:  dataFlagParallelDownloads,
 							Usage: "number of download requests to make in parallel",
-							Value: 100,
+							Value: defaultParallelBinaryDownloads,
 						},
 						&cli.UintFlag{
 							Name:  dataFlagTimeout,

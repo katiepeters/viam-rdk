@@ -87,7 +87,7 @@ func (c *viamClient) downloadSequenceBinaryBlobs(
 		return errors.Wrapf(err, "could not create %s", binaryDir)
 	}
 	if parallel == 0 {
-		parallel = 100
+		parallel = defaultParallelBinaryDownloads
 	}
 
 	printf(c.c.Root().Writer, "Downloading binary blobs to %s", binaryDir)
