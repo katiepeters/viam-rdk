@@ -42,8 +42,7 @@ const (
 	maxLimit      = 100
 
 	// defaultParallelBinaryDownloads backs every --parallel flag, and is the fallback the download
-	// flows apply when handed 0 (a zero-worker pool would never drain its ID channel). Keep the
-	// flag defaults and the fallbacks reading from here so they can't drift apart.
+	// flows apply when passed a parellel value of 0.
 	defaultParallelBinaryDownloads = 100
 
 	dataCommandAdd    = "add"
@@ -735,6 +734,12 @@ func (c *viamClient) performActionOnBinaryDataIDs(ctx context.Context,
 	produceIDs func(ctx context.Context, ids chan<- string) error,
 	actionOnBinaryData func(string) error, parallelActions uint, printStatement func(int32),
 ) error {
+	// --parallel accepts 0, which would spawn no workers at all and leave produceIDs blocked
+	// forever on a send nobody reads. Treat it as "unset" and use the default instead.
+	if parallelActions == 0 {
+		parallelActions = defaultParallelBinaryDownloads
+	}
+
 	ids := make(chan string, parallelActions)
 	// Give channel buffer of 1+parallelActions because that is the number of goroutines that may be passing an
 	// error into this channel (1 get ids routine + parallelActions worker routines).

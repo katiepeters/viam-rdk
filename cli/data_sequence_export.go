@@ -158,9 +158,6 @@ func sanitizeForFileName(s string) string {
 // binary/ keeps it a sibling of tabular/ rather than mixing data/ and metadata/ into the top
 // level of the destination.
 func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst string, parallel, timeout uint) error {
-	if parallel == 0 {
-		parallel = defaultParallelBinaryDownloads
-	}
 	binaryDst := filepath.Join(dst, sequenceBinaryExportDir)
 
 	printf(c.c.Root().Writer, "Downloading binary data for sequence %s to %s", sequenceID, binaryDst)

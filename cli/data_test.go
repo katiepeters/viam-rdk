@@ -409,6 +409,51 @@ func TestDataExportBinaryFromFilter(t *testing.T) {
 	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring, "Downloaded 3 files")
 }
 
+// TestDataExportBinaryZeroParallel guards against --parallel=0. The flag accepts it, and without
+// normalization it spawns no workers, leaving the ID producer blocked forever on a send nobody
+// reads — the command hangs rather than failing. Regression: this test times out if that returns.
+func TestDataExportBinaryZeroParallel(t *testing.T) {
+	newMeta := func(id string) *datapb.BinaryMetadata {
+		return &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
+	}
+	call := 0
+	dsc := &inject.DataServiceClient{
+		BinaryDataByFilterFunc: func(_ context.Context, _ *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.BinaryDataByFilterResponse, error) {
+			call++
+			if call == 1 {
+				return &datapb.BinaryDataByFilterResponse{
+					Data: []*datapb.BinaryData{{Metadata: newMeta("bin-1")}},
+				}, nil
+			}
+			return &datapb.BinaryDataByFilterResponse{}, nil
+		},
+		BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
+		) (*datapb.BinaryDataByIDsResponse, error) {
+			resp := &datapb.BinaryDataByIDsResponse{}
+			for _, id := range in.GetBinaryDataIds() {
+				datum := &datapb.BinaryData{Metadata: newMeta(id)}
+				if in.GetIncludeBinary() {
+					datum.Binary = []byte("bytes-" + id)
+				}
+				resp.Data = append(resp.Data, datum)
+			}
+			return resp, nil
+		},
+	}
+
+	dst := t.TempDir()
+	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+	_ = cCtx
+
+	err := ac.binaryData(context.Background(), dst, &datapb.Filter{PartId: "p1"}, 0, 0)
+	test.That(t, err, test.ShouldBeNil)
+
+	// 0 is treated as unset, so the download still happens at the default width.
+	path := dataFilePath(dst, filenameForDownload(newMeta("bin-1")), ".jpg")
+	test.That(t, mustReadFile(t, path), test.ShouldResemble, []byte("bytes-bin-1"))
+}
+
 func TestDataQueryBinaryAction(t *testing.T) {
 	page := &datapb.BinaryDataByFilterResponse{
 		Data: []*datapb.BinaryData{
