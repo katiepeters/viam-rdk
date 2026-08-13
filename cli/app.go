@@ -449,6 +449,18 @@ func createBeforeCommandWithT[T any](
 	}
 }
 
+// mustBePositiveUint builds a flag Validator that rejects an explicit 0, for flags where zero is
+// meaningless rather than merely small — a worker count of 0 does no work at all. urfave only
+// runs Validators on values the user actually set, so flag defaults are unaffected.
+func mustBePositiveUint(flagName string) func(uint) error {
+	return func(v uint) error {
+		if v == 0 {
+			return fmt.Errorf("--%s must be greater than 0", flagName)
+		}
+		return nil
+	}
+}
+
 // createUsageText is a helper for formatting UsageTexts. The created UsageText
 // contains "viam", the command, requiredFlags, "[other options]" if unrequiredOptions
 // is true, "<command> [command options]" if subcommand is true, and all passed-in
@@ -1341,9 +1353,10 @@ Note: There is no progress meter while copying is in progress.
 											TakesFile: true,
 										},
 										&cli.UintFlag{
-											Name:  dataFlagParallelDownloads,
-											Usage: "number of download requests to make in parallel",
-											Value: defaultParallelBinaryDownloads,
+											Name:      dataFlagParallelDownloads,
+											Usage:     "number of download requests to make in parallel",
+											Value:     defaultParallelBinaryDownloads,
+											Validator: mustBePositiveUint(dataFlagParallelDownloads),
 										},
 										&cli.UintFlag{
 											Name:  dataFlagTimeout,
@@ -1463,9 +1476,10 @@ Note: There is no progress meter while copying is in progress.
 										"only needed when the server cannot infer it, since sequences do not record subtypes",
 								},
 								&cli.UintFlag{
-									Name:  dataFlagParallelDownloads,
-									Usage: "number of download requests to make in parallel",
-									Value: defaultParallelBinaryDownloads,
+									Name:      dataFlagParallelDownloads,
+									Usage:     "number of download requests to make in parallel",
+									Value:     defaultParallelBinaryDownloads,
+									Validator: mustBePositiveUint(dataFlagParallelDownloads),
 								},
 								&cli.UintFlag{
 									Name:  dataFlagTimeout,
@@ -1973,9 +1987,10 @@ Note: There is no progress meter while copying is in progress.
 							Usage: "option to include only the JSON Lines files for local testing; no binary data will be downloaded",
 						},
 						&cli.UintFlag{
-							Name:  dataFlagParallelDownloads,
-							Usage: "number of download requests to make in parallel",
-							Value: defaultParallelBinaryDownloads,
+							Name:      dataFlagParallelDownloads,
+							Usage:     "number of download requests to make in parallel",
+							Value:     defaultParallelBinaryDownloads,
+							Validator: mustBePositiveUint(dataFlagParallelDownloads),
 						},
 						&cli.UintFlag{
 							Name:  dataFlagTimeout,

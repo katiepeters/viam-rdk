@@ -42,7 +42,9 @@ const (
 	maxLimit      = 100
 
 	// defaultParallelBinaryDownloads backs every --parallel flag, and is the fallback the download
-	// flows apply when passed a parellel value of 0.
+	// flows apply when passed a parallel value of 0. The CLI rejects an explicit --parallel=0
+	// (see mustBePositiveUint), so the fallback only covers programmatic callers — without it a
+	// zero-worker pool leaves the ID producer blocked forever on a send nobody reads.
 	defaultParallelBinaryDownloads = 100
 
 	dataCommandAdd    = "add"
