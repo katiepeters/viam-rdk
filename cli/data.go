@@ -713,21 +713,36 @@ func (c *viamClient) binaryData(ctx context.Context, dst string, filter *datapb.
 func (c *viamClient) performActionOnBinaryDataFromFilter(actionOnBinaryData func(string) error,
 	filter *datapb.Filter, parallelActions uint, printStatement func(int32),
 ) error {
+	return c.performActionOnBinaryDataIDs(context.Background(),
+		func(ctx context.Context, ids chan<- string) error {
+			// If limit is too high the request can time out, so limit each call to a maximum value of 100.
+			limit := min(parallelActions, maxLimit)
+			return getMatchingBinaryIDs(ctx, c.dataClient, filter, ids, limit)
+		},
+		actionOnBinaryData, parallelActions, printStatement)
+}
+
+// performActionOnBinaryDataIDs runs produceIDs in its own goroutine to stream binary data IDs, and
+// performs actionOnBinaryData on each of them across parallelActions workers. produceIDs owns
+// closing the channel it is given. Each time `logEveryN` actions have been performed, printStatement
+// logs how much binary data has been processed thus far. The first error cancels the remaining work.
+func (c *viamClient) performActionOnBinaryDataIDs(ctx context.Context,
+	produceIDs func(ctx context.Context, ids chan<- string) error,
+	actionOnBinaryData func(string) error, parallelActions uint, printStatement func(int32),
+) error {
 	ids := make(chan string, parallelActions)
 	// Give channel buffer of 1+parallelActions because that is the number of goroutines that may be passing an
 	// error into this channel (1 get ids routine + parallelActions worker routines).
 	errs := make(chan error, 1+parallelActions)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
 
-	// In one routine, get all IDs matching the filter and pass them into the ids channel.
+	// In one routine, get all matching IDs and pass them into the ids channel.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// If limit is too high the request can time out, so limit each call to a maximum value of 100.
-		limit := min(parallelActions, maxLimit)
-		if err := getMatchingBinaryIDs(ctx, c.dataClient, filter, ids, limit); err != nil {
+		if err := produceIDs(ctx, ids); err != nil {
 			errs <- err
 			cancel()
 		}
@@ -779,7 +794,7 @@ func (c *viamClient) performActionOnBinaryDataFromFilter(actionOnBinaryData func
 
 // getMatchingBinaryIDs queries client for all BinaryData matching filter, and passes each of their ids into ids.
 func getMatchingBinaryIDs(ctx context.Context, client datapb.DataServiceClient, filter *datapb.Filter,
-	ids chan string, limit uint,
+	ids chan<- string, limit uint,
 ) error {
 	defer close(ids)
 	return forEachBinaryDataByFilter(ctx, client, filter, uint64(limit),
@@ -1077,11 +1092,17 @@ func (c *viamClient) tabularData(dest string, request *datapb.ExportTabularDataR
 		return errors.Wrapf(err, "could not create destination directories")
 	}
 
+	return c.tabularDataToFile(filepath.Join(dest, dataFileName), request)
+}
+
+// tabularDataToFile streams the tabular export for request into dataFilePath, creating or
+// truncating it. The parent directory must already exist. Callers that export several requests
+// (e.g. one per resource of a sequence) use this directly so each gets its own file.
+func (c *viamClient) tabularDataToFile(dataFilePath string, request *datapb.ExportTabularDataRequest) error {
 	fmt.Fprintf(c.c.Root().Writer, "Downloading..") //nolint:errcheck
 
 	for count := 0; count < maxRetryCount; count++ {
 		err := func() error {
-			dataFilePath := filepath.Join(dest, dataFileName)
 			dataFile, err := os.Create(dataFilePath) //nolint:gosec
 			if err != nil {
 				return errors.Wrapf(err, "could not create data file")
