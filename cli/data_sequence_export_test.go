@@ -295,6 +295,89 @@ func TestDataExportSequenceAction_SurfacesBinaryErrors(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "server boom")
 }
 
+// TestDataExportSequenceAction_PagesBinaryData guards the paging loop in
+// forEachSequenceBinaryData: every page must be consumed, and each request after the first must
+// carry the token the previous response returned.
+func TestDataExportSequenceAction_PagesBinaryData(t *testing.T) {
+	pages := map[string]*datapb.GetSequenceBinaryDataResponse{
+		"": {Data: []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")}, NextPageToken: "page-2"},
+		"page-2": {
+			Data:          []*datapb.BinaryData{mkBinaryData("bd-2", ".jpg"), mkBinaryData("bd-3", ".jpg")},
+			NextPageToken: "page-3",
+		},
+		// Terminal page: empty next token ends the loop.
+		"page-3": {Data: []*datapb.BinaryData{mkBinaryData("bd-4", ".jpg")}},
+	}
+
+	var mu sync.Mutex
+	var requestedTokens []string
+	dsc := &inject.DataServiceClient{
+		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
+		) (*datapb.GetSequenceResponse, error) {
+			return &datapb.GetSequenceResponse{Sequence: testSequence()}, nil
+		},
+		GetSequenceBinaryDataFunc: func(_ context.Context, in *datapb.GetSequenceBinaryDataRequest, _ ...grpc.CallOption,
+		) (*datapb.GetSequenceBinaryDataResponse, error) {
+			mu.Lock()
+			requestedTokens = append(requestedTokens, in.GetPageToken())
+			mu.Unlock()
+			resp, ok := pages[in.GetPageToken()]
+			if !ok {
+				return nil, errors.New("unexpected page token " + in.GetPageToken())
+			}
+			return resp, nil
+		},
+		BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
+		) (*datapb.BinaryDataByIDsResponse, error) {
+			resp := &datapb.BinaryDataByIDsResponse{}
+			for _, id := range in.GetBinaryDataIds() {
+				datum := &datapb.BinaryData{
+					Metadata: &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"},
+				}
+				if in.GetIncludeBinary() {
+					datum.Binary = []byte("bytes-" + id)
+				}
+				resp.Data = append(resp.Data, datum)
+			}
+			return resp, nil
+		},
+	}
+	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+	_ = cCtx
+
+	dst := t.TempDir()
+	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
+		Destination: dst,
+		SequenceID:  testSequenceID,
+		Parallel:    2,
+		OnlyBinary:  true,
+	})
+	test.That(t, err, test.ShouldBeNil)
+
+	test.That(t, requestedTokens, test.ShouldResemble, []string{"", "page-2", "page-3"})
+	for _, id := range []string{"bd-1", "bd-2", "bd-3", "bd-4"} {
+		fileName := filenameForDownload(&datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"})
+		test.That(t, mustReadFile(t, dataFilePath(dst, fileName, ".jpg")), test.ShouldResemble, []byte("bytes-"+id))
+	}
+}
+
+// TestDataExportSequenceAction_DefaultsParallel covers the --parallel=0 fallback; without it the
+// worker pool would be empty and no blob would ever be downloaded.
+func TestDataExportSequenceAction_DefaultsParallel(t *testing.T) {
+	ac, _ := sequenceExportClient(t, testSequence(), []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")})
+
+	dst := t.TempDir()
+	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
+		Destination: dst,
+		SequenceID:  testSequenceID,
+		OnlyBinary:  true,
+	})
+	test.That(t, err, test.ShouldBeNil)
+
+	fileName := filenameForDownload(&datapb.BinaryMetadata{BinaryDataId: "bd-1", FileName: "bd-1.jpg", FileExt: ".jpg"})
+	test.That(t, mustReadFile(t, dataFilePath(dst, fileName, ".jpg")), test.ShouldResemble, []byte("bytes-bd-1"))
+}
+
 // TestDataExportSequenceCommandFlags guards that every flag registered on `data export sequence`
 // maps onto a field of dataExportSequenceArgs, since that binding is reflective.
 func TestDataExportSequenceCommandFlags(t *testing.T) {

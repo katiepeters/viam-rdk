@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -349,6 +350,63 @@ func TestDataSourceTypeToProto(t *testing.T) {
 				name, tabularDataByMQLDataSourceTypes))
 		}
 	})
+}
+
+// TestDataExportBinaryFromFilter covers `data export binary filter` end to end: the filter is
+// paged, every matching id is downloaded, and progress is reported. It guards the shared
+// performActionOnBinaryDataIDs driver, which the sequence export also runs on.
+func TestDataExportBinaryFromFilter(t *testing.T) {
+	newMeta := func(id string) *datapb.BinaryMetadata {
+		return &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
+	}
+	// Two pages of results, then an empty page to terminate.
+	pages := [][]string{{"bin-1", "bin-2"}, {"bin-3"}, {}}
+
+	var mu sync.Mutex
+	var capturedFilter *datapb.Filter
+	call := 0
+	dsc := &inject.DataServiceClient{
+		BinaryDataByFilterFunc: func(_ context.Context, in *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.BinaryDataByFilterResponse, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			capturedFilter = in.GetDataRequest().GetFilter()
+			resp := &datapb.BinaryDataByFilterResponse{}
+			for _, id := range pages[call] {
+				resp.Data = append(resp.Data, &datapb.BinaryData{Metadata: newMeta(id)})
+			}
+			call++
+			return resp, nil
+		},
+		BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
+		) (*datapb.BinaryDataByIDsResponse, error) {
+			resp := &datapb.BinaryDataByIDsResponse{}
+			for _, id := range in.GetBinaryDataIds() {
+				datum := &datapb.BinaryData{Metadata: newMeta(id)}
+				if in.GetIncludeBinary() {
+					datum.Binary = []byte("bytes-" + id)
+				}
+				resp.Data = append(resp.Data, datum)
+			}
+			return resp, nil
+		},
+	}
+
+	dst := t.TempDir()
+	_, ac, out, errOut := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+
+	filter := &datapb.Filter{PartId: "p1"}
+	err := ac.binaryData(context.Background(), dst, filter, 4, 0)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(errOut.messages), test.ShouldEqual, 0)
+	test.That(t, capturedFilter.GetPartId(), test.ShouldEqual, "p1")
+
+	// Every id across both pages was downloaded.
+	for _, id := range []string{"bin-1", "bin-2", "bin-3"} {
+		path := dataFilePath(dst, filenameForDownload(newMeta(id)), ".jpg")
+		test.That(t, mustReadFile(t, path), test.ShouldResemble, []byte("bytes-"+id))
+	}
+	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring, "Downloaded 3 files")
 }
 
 func TestDataQueryBinaryAction(t *testing.T) {
