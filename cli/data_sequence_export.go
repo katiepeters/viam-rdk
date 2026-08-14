@@ -190,7 +190,7 @@ func sanitizeForFileName(s string) string {
 func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst string, parallel, timeout uint) error {
 	binaryDst := filepath.Join(dst, sequenceBinaryExportDir)
 
-	streamIDs := func(ctx context.Context, ids chan<- string) error {
+	fetchIDsInto := func(ctx context.Context, ids chan<- string) error {
 		defer close(ids)
 		return forEachSequenceBinaryData(ctx, c.dataClient, sequenceID, func(bd *datapb.BinaryData) error {
 			select {
@@ -209,5 +209,5 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 	}
 
 	printf(c.c.Root().Writer, "Downloading binary data for sequence %s to %s", sequenceID, binaryDst)
-	return c.performActionOnBinaryDataIDs(ctx, streamIDs, download, parallel, reportProgress)
+	return c.performActionOnBinaryDataIDs(ctx, fetchIDsInto, download, parallel, reportProgress)
 }

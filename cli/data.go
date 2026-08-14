@@ -715,13 +715,13 @@ func (c *viamClient) binaryData(ctx context.Context, dst string, filter *datapb.
 func (c *viamClient) performActionOnBinaryDataFromFilter(actionOnBinaryData func(context.Context, string) error,
 	filter *datapb.Filter, parallelActions uint, printStatement func(int32),
 ) error {
-	return c.performActionOnBinaryDataIDs(context.Background(),
-		func(ctx context.Context, ids chan<- string) error {
-			// If limit is too high the request can time out, so limit each call to a maximum value of 100.
-			limit := min(parallelActions, maxLimit)
-			return getMatchingBinaryIDs(ctx, c.dataClient, filter, ids, limit)
-		},
-		actionOnBinaryData, parallelActions, printStatement)
+	fetchIDsInto := func(ctx context.Context, ids chan<- string) error {
+		// If limit is too high the request can time out, so limit each call to a maximum value of 100.
+		limit := min(parallelActions, maxLimit)
+		return getMatchingBinaryIDs(ctx, c.dataClient, filter, ids, limit)
+	}
+	return c.performActionOnBinaryDataIDs(
+		context.Background(), fetchIDsInto, actionOnBinaryData, parallelActions, printStatement)
 }
 
 // performActionOnBinaryDataIDs runs fetchIDsInto in its own goroutine to page binary data IDs in
