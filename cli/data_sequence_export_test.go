@@ -73,6 +73,16 @@ func sequenceExportClient(
 			}
 			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
 		},
+		// Every resource resolves to a subtype derived from its name, so tests can tell which
+		// lookup fed which export request.
+		//nolint:staticcheck
+		TabularDataByFilterFunc: func(_ context.Context, in *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.TabularDataByFilterResponse, error) {
+			name := in.GetDataRequest().GetFilter().GetComponentName()
+			return &datapb.TabularDataByFilterResponse{
+				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:" + name}},
+			}, nil
+		},
 		ExportTabularDataFunc: func(_ context.Context, in *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
 		) (datapb.DataService_ExportTabularDataClient, error) {
 			mu.Lock()
@@ -162,10 +172,9 @@ func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
 
 	dst := t.TempDir()
 	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination:     dst,
-		SequenceID:      testSequenceID,
-		ResourceSubtype: "rdk:component:camera",
-		OnlyTabular:     true,
+		Destination: dst,
+		SequenceID:  testSequenceID,
+		OnlyTabular: true,
 	})
 	test.That(t, err, test.ShouldBeNil)
 
@@ -173,7 +182,6 @@ func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
 	test.That(t, len(*tabularRequests), test.ShouldEqual, 2)
 	for _, req := range *tabularRequests {
 		test.That(t, req.GetPartId(), test.ShouldEqual, testSequencePart)
-		test.That(t, req.GetResourceSubtype(), test.ShouldEqual, "rdk:component:camera")
 		test.That(t, req.GetInterval().GetStart().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceStart)
 		test.That(t, req.GetInterval().GetEnd().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceEnd)
 	}
@@ -181,6 +189,10 @@ func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
 	test.That(t, (*tabularRequests)[0].GetMethodName(), test.ShouldEqual, "ReadImage")
 	test.That(t, (*tabularRequests)[1].GetResourceName(), test.ShouldEqual, "sensor-1")
 	test.That(t, (*tabularRequests)[1].GetMethodName(), test.ShouldEqual, "Readings")
+
+	// Each resource carries its own resolved subtype rather than one value applied to all of them.
+	test.That(t, (*tabularRequests)[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:camera-1")
+	test.That(t, (*tabularRequests)[1].GetResourceSubtype(), test.ShouldEqual, "rdk:component:sensor-1")
 
 	// Each resource lands in its own NDJSON file rather than overwriting a shared one.
 	cameraRows := readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "camera-1-ReadImage.ndjson"))
@@ -260,12 +272,100 @@ func TestDataExportSequenceAction_ExportsTabularAndBinaryByDefault(t *testing.T)
 	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
 }
 
+// TestDataExportSequenceAction_SkipsResourceWithNoData covers a resource that captured nothing in
+// the sequence's interval: the subtype lookup comes back empty, and since ExportTabularData needs
+// one, the resource is skipped rather than exported with a blank subtype.
+func TestDataExportSequenceAction_SkipsResourceWithNoData(t *testing.T) {
+	sequence := testSequence(
+		sequenceResource("camera-1", "ReadImage"),
+		sequenceResource("ghost-1", "Readings"),
+	)
+
+	var mu sync.Mutex
+	var tabularRequests []*datapb.ExportTabularDataRequest
+	dsc := &inject.DataServiceClient{
+		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
+		) (*datapb.GetSequenceResponse, error) {
+			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
+		},
+		//nolint:staticcheck
+		TabularDataByFilterFunc: func(_ context.Context, in *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.TabularDataByFilterResponse, error) {
+			if in.GetDataRequest().GetFilter().GetComponentName() == "ghost-1" {
+				return &datapb.TabularDataByFilterResponse{}, nil
+			}
+			return &datapb.TabularDataByFilterResponse{
+				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:camera"}},
+			}, nil
+		},
+		ExportTabularDataFunc: func(_ context.Context, in *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
+		) (datapb.DataService_ExportTabularDataClient, error) {
+			mu.Lock()
+			tabularRequests = append(tabularRequests, in)
+			mu.Unlock()
+			return newMockExportStream([]*datapb.ExportTabularDataResponse{{LocationId: "loc-id"}}, nil), nil
+		},
+	}
+	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+	_ = cCtx
+
+	dst := t.TempDir()
+	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
+		Destination: dst,
+		SequenceID:  testSequenceID,
+		OnlyTabular: true,
+	})
+	test.That(t, err, test.ShouldBeNil)
+
+	// Only the resource with data was exported, and it carries the resolved subtype.
+	test.That(t, len(tabularRequests), test.ShouldEqual, 1)
+	test.That(t, tabularRequests[0].GetResourceName(), test.ShouldEqual, "camera-1")
+	test.That(t, tabularRequests[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:camera")
+
+	// No file is written for the skipped resource.
+	_, err = os.Stat(filepath.Join(dst, sequenceTabularDir, "ghost-1-Readings.ndjson"))
+	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+}
+
+func TestDataExportSequenceAction_SurfacesSubtypeLookupErrors(t *testing.T) {
+	sequence := testSequence(sequenceResource("camera-1", "ReadImage"))
+	dsc := &inject.DataServiceClient{
+		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
+		) (*datapb.GetSequenceResponse, error) {
+			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
+		},
+		//nolint:staticcheck
+		TabularDataByFilterFunc: func(_ context.Context, _ *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.TabularDataByFilterResponse, error) {
+			return nil, errors.New("lookup boom")
+		},
+	}
+	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+	_ = cCtx
+
+	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
+		Destination: t.TempDir(),
+		SequenceID:  testSequenceID,
+		OnlyTabular: true,
+	})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "camera-1")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "lookup boom")
+}
+
 func TestDataExportSequenceAction_SurfacesTabularErrors(t *testing.T) {
 	sequence := testSequence(sequenceResource("camera-1", "ReadImage"))
 	dsc := &inject.DataServiceClient{
 		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
 		) (*datapb.GetSequenceResponse, error) {
 			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
+		},
+		//nolint:staticcheck
+		TabularDataByFilterFunc: func(_ context.Context, _ *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.TabularDataByFilterResponse, error) {
+			return &datapb.TabularDataByFilterResponse{
+				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:camera"}},
+			}, nil
 		},
 		ExportTabularDataFunc: func(_ context.Context, _ *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
 		) (datapb.DataService_ExportTabularDataClient, error) {
@@ -380,19 +480,17 @@ func TestDataExportSequenceCommandFlags(t *testing.T) {
 	out := &testWriter{}
 	errOut := &testWriter{}
 	cCtx := buildTestCmd(out, errOut, map[string]any{
-		generalFlagDestination:     utils.ResolveFile(""),
-		dataFlagSequenceID:         testSequenceID,
-		generalFlagResourceSubtype: "rdk:component:camera",
-		dataFlagParallelDownloads:  uint(4),
-		dataFlagTimeout:            uint(7),
-		dataFlagOnlyTabular:        true,
-		dataFlagOnlyBinary:         true,
+		generalFlagDestination:    utils.ResolveFile(""),
+		dataFlagSequenceID:        testSequenceID,
+		dataFlagParallelDownloads: uint(4),
+		dataFlagTimeout:           uint(7),
+		dataFlagOnlyTabular:       true,
+		dataFlagOnlyBinary:        true,
 	})
 
 	args := parseStructFromCtx[dataExportSequenceArgs](cCtx)
 	test.That(t, args.Destination, test.ShouldEqual, utils.ResolveFile(""))
 	test.That(t, args.SequenceID, test.ShouldEqual, testSequenceID)
-	test.That(t, args.ResourceSubtype, test.ShouldEqual, "rdk:component:camera")
 	test.That(t, args.Parallel, test.ShouldEqual, uint(4))
 	test.That(t, args.Timeout, test.ShouldEqual, uint(7))
 	test.That(t, args.OnlyTabular, test.ShouldBeTrue)

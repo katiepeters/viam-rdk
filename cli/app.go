@@ -449,9 +449,7 @@ func createBeforeCommandWithT[T any](
 	}
 }
 
-// mustBePositiveUint builds a flag Validator that rejects an explicit 0, for flags where zero is
-// meaningless rather than merely small — a worker count of 0 does no work at all. urfave only
-// runs Validators on values the user actually set, so flag defaults are unaffected.
+// mustBePositiveUint builds a flag Validator that rejects an explicit 0.
 func mustBePositiveUint(flagName string) func(uint) error {
 	return func(v uint) error {
 		if v == 0 {
@@ -1469,11 +1467,6 @@ Note: There is no progress meter while copying is in progress.
 									Name:     dataFlagSequenceID,
 									Required: true,
 									Usage:    "ID of the sequence to export",
-								},
-								&cli.StringFlag{
-									Name: generalFlagResourceSubtype,
-									Usage: "resource subtype (sometimes called 'component type') to scope the tabular export to. " +
-										"only needed when the server cannot infer it, since sequences do not record subtypes",
 								},
 								&cli.UintFlag{
 									Name:      dataFlagParallelDownloads,

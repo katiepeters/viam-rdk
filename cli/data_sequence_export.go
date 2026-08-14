@@ -13,13 +13,7 @@ import (
 )
 
 const (
-	// sequenceTabularDir is the subdirectory under the destination that holds one NDJSON file
-	// per resource the sequence references.
-	sequenceTabularDir = "tabular"
-
-	// sequenceBinaryExportDir is the subdirectory under the destination that binary data is
-	// rooted at, so it sits alongside tabular/ rather than at the top level. `data export
-	// binary`'s data/ and metadata/ layout is written beneath it.
+	sequenceTabularDir      = "tabular"
 	sequenceBinaryExportDir = "binary"
 )
 
@@ -29,13 +23,12 @@ const (
 var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 type dataExportSequenceArgs struct {
-	Destination     string
-	SequenceID      string
-	ResourceSubtype string
-	Parallel        uint
-	Timeout         uint
-	OnlyTabular     bool
-	OnlyBinary      bool
+	Destination string
+	SequenceID  string
+	Parallel    uint
+	Timeout     uint
+	OnlyTabular bool
+	OnlyBinary  bool
 }
 
 // DataExportSequenceAction is the corresponding action for 'data export sequence'.
@@ -48,10 +41,8 @@ func DataExportSequenceAction(ctx context.Context, cmd *cli.Command, args dataEx
 	return client.dataExportSequenceAction(ctx, args)
 }
 
-// dataExportSequenceAction exports one sequence to args.Destination. A sequence carries the part,
-// time interval, and resource/method pairs its data was captured from, so the export is the
-// tabular export of each of those resources over that interval (`data export tabular`), plus the
-// binary data the sequence references (`data export binary`).
+// dataExportSequenceAction exports a sequence's tabular data, for each resource it covers over its
+// capture interval, plus the binary data it references.
 func (c *viamClient) dataExportSequenceAction(ctx context.Context, args dataExportSequenceArgs) error {
 	if args.OnlyTabular && args.OnlyBinary {
 		return errors.Errorf("--%s and --%s cannot both be provided", dataFlagOnlyTabular, dataFlagOnlyBinary)
@@ -71,7 +62,7 @@ func (c *viamClient) dataExportSequenceAction(ctx context.Context, args dataExpo
 	}
 
 	if !args.OnlyBinary {
-		if err := c.exportSequenceTabular(sequence, args.Destination, args.ResourceSubtype); err != nil {
+		if err := c.exportSequenceTabular(ctx, sequence, args.Destination); err != nil {
 			return err
 		}
 	}
@@ -84,10 +75,8 @@ func (c *viamClient) dataExportSequenceAction(ctx context.Context, args dataExpo
 }
 
 // exportSequenceTabular runs one tabular export per resource the sequence references, scoped to
-// the sequence's part and capture interval, writing each to its own NDJSON file under
-// dst/tabular/. resourceSubtype, when non-empty, is applied to every request; sequences don't
-// record subtypes, so it's only needed when the server can't infer one.
-func (c *viamClient) exportSequenceTabular(sequence *datapb.Sequence, dst, resourceSubtype string) error {
+// the sequence's part and capture interval, writing each to its own NDJSON file under dst/tabular/.
+func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb.Sequence, dst string) error {
 	resources := sequence.GetResources()
 	if len(resources) == 0 {
 		printf(c.c.Root().Writer, "Sequence %s references no resources; skipping tabular export", sequence.GetId())
@@ -102,10 +91,20 @@ func (c *viamClient) exportSequenceTabular(sequence *datapb.Sequence, dst, resou
 	interval := &datapb.CaptureInterval{Start: sequence.GetStartTime(), End: sequence.GetEndTime()}
 	names := sequenceTabularFileNames(resources)
 	for i, resource := range resources {
+		subtype, err := c.resolveResourceSubtype(ctx, sequence.GetPartId(), resource, interval)
+		if err != nil {
+			return err
+		}
+		if subtype == "" {
+			printf(c.c.Root().Writer, "No captured data for resource %q method %q in the sequence's interval; skipping",
+				resource.GetResourceName(), resource.GetMethodName())
+			continue
+		}
+
 		request := &datapb.ExportTabularDataRequest{
 			PartId:          sequence.GetPartId(),
 			ResourceName:    resource.GetResourceName(),
-			ResourceSubtype: resourceSubtype,
+			ResourceSubtype: subtype,
 			MethodName:      resource.GetMethodName(),
 			Interval:        interval,
 		}
@@ -119,6 +118,40 @@ func (c *viamClient) exportSequenceTabular(sequence *datapb.Sequence, dst, resou
 		}
 	}
 	return nil
+}
+
+// resolveResourceSubtype discovers a resource's subtype, which ExportTabularData requires but a
+// SequenceResourceFilter does not record. It asks for a single captured row matching the same
+// part, resource, method, and interval the export will use, and reads the subtype off that row's
+// CaptureMetadata. Returns "" when the resource captured nothing in the interval, in which case
+// there is nothing to export for it either.
+func (c *viamClient) resolveResourceSubtype(
+	ctx context.Context, partID string, resource *datapb.SequenceResourceFilter, interval *datapb.CaptureInterval,
+) (string, error) {
+	//nolint:staticcheck // TabularDataByFilter is deprecated, but it is the only call that maps a
+	// resource name to its subtype; every newer tabular RPC takes the subtype as an input.
+	resp, err := c.dataClient.TabularDataByFilter(ctx, &datapb.TabularDataByFilterRequest{
+		DataRequest: &datapb.DataRequest{
+			Filter: &datapb.Filter{
+				PartId:        partID,
+				ComponentName: resource.GetResourceName(),
+				Method:        resource.GetMethodName(),
+				Interval:      interval,
+			},
+			Limit: 1,
+		},
+		CountOnly: false,
+	})
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to look up the subtype of resource %q method %q",
+			resource.GetResourceName(), resource.GetMethodName())
+	}
+	for _, meta := range resp.GetMetadata() {
+		if subtype := meta.GetComponentType(); subtype != "" {
+			return subtype, nil
+		}
+	}
+	return "", nil
 }
 
 // sequenceTabularFileNames builds one NDJSON file name per resource, positionally matching
