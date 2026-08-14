@@ -229,12 +229,12 @@ func DataTagActionByFilter(ctx context.Context, cmd *cli.Command, args dataTagBy
 
 	switch cmd.Name {
 	case dataCommandAdd:
-		if err := client.dataAddTagsToBinaryByFilter(filter, args.Tags); err != nil {
+		if err := client.dataAddTagsToBinaryByFilter(ctx, filter, args.Tags); err != nil {
 			return err
 		}
 		return nil
 	case dataCommandRemove:
-		if err := client.dataRemoveTagsFromBinaryByFilter(filter, args.Tags); err != nil {
+		if err := client.dataRemoveTagsFromBinaryByFilter(ctx, filter, args.Tags); err != nil {
 			return err
 		}
 		return nil
@@ -697,7 +697,7 @@ func writeQueryResults(w io.Writer, dest string, rows [][]byte) error {
 
 // BinaryData downloads binary data matching filter to dst.
 func (c *viamClient) binaryData(ctx context.Context, dst string, filter *datapb.Filter, parallelDownloads, timeout uint) error {
-	return c.performActionOnBinaryDataFromFilter(
+	return c.performActionOnBinaryDataFromFilter(ctx,
 		func(ctx context.Context, id string) error {
 			return c.downloadBinary(ctx, dst, timeout, id)
 		},
@@ -712,7 +712,8 @@ func (c *viamClient) binaryData(ctx context.Context, dst string, filter *datapb.
 // a filter in batches and then performs actionOnBinaryData on each binary data in parallel.
 // Each time `logEveryN` actions have been performed, the printStatement logs a statement that takes in as
 // input how much binary data has been processed thus far.
-func (c *viamClient) performActionOnBinaryDataFromFilter(actionOnBinaryData func(context.Context, string) error,
+func (c *viamClient) performActionOnBinaryDataFromFilter(ctx context.Context,
+	actionOnBinaryData func(context.Context, string) error,
 	filter *datapb.Filter, parallelActions uint, printStatement func(int32),
 ) error {
 	fetchIDsInto := func(ctx context.Context, ids chan<- string) error {
@@ -720,8 +721,7 @@ func (c *viamClient) performActionOnBinaryDataFromFilter(actionOnBinaryData func
 		limit := min(parallelActions, maxLimit)
 		return getMatchingBinaryIDs(ctx, c.dataClient, filter, ids, limit)
 	}
-	return c.performActionOnBinaryDataIDs(
-		context.Background(), fetchIDsInto, actionOnBinaryData, parallelActions, printStatement)
+	return c.performActionOnBinaryDataIDs(ctx, fetchIDsInto, actionOnBinaryData, parallelActions, printStatement)
 }
 
 // performActionOnBinaryDataIDs runs fetchIDsInto in its own goroutine to page binary data IDs in
@@ -802,8 +802,14 @@ func getMatchingBinaryIDs(ctx context.Context, client datapb.DataServiceClient, 
 	defer close(ids)
 	return forEachBinaryDataByFilter(ctx, client, filter, uint64(limit),
 		func(bd *datapb.BinaryData) (bool, error) {
-			ids <- bd.GetMetadata().GetBinaryDataId()
-			return false, nil
+			// Select on ctx rather than sending bare: when an action fails, the workers cancel and
+			// return, and a bare send would then block forever on a full channel nobody is reading.
+			select {
+			case ids <- bd.GetMetadata().GetBinaryDataId():
+				return false, nil
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
 		})
 }
 
@@ -1254,9 +1260,9 @@ func (c *viamClient) deleteBinaryData(filter *datapb.Filter) error {
 	return nil
 }
 
-func (c *viamClient) dataAddTagsToBinaryByFilter(filter *datapb.Filter, tags []string) error {
+func (c *viamClient) dataAddTagsToBinaryByFilter(ctx context.Context, filter *datapb.Filter, tags []string) error {
 	parallelActions := uint(100)
-	return c.performActionOnBinaryDataFromFilter(
+	return c.performActionOnBinaryDataFromFilter(ctx,
 		func(ctx context.Context, id string) error {
 			_, err := c.dataClient.AddTagsToBinaryDataByIDs(ctx,
 				&datapb.AddTagsToBinaryDataByIDsRequest{Tags: tags, BinaryDataIds: []string{id}})
@@ -1269,9 +1275,9 @@ func (c *viamClient) dataAddTagsToBinaryByFilter(filter *datapb.Filter, tags []s
 	)
 }
 
-func (c *viamClient) dataRemoveTagsFromBinaryByFilter(filter *datapb.Filter, tags []string) error {
+func (c *viamClient) dataRemoveTagsFromBinaryByFilter(ctx context.Context, filter *datapb.Filter, tags []string) error {
 	parallelActions := uint(100)
-	return c.performActionOnBinaryDataFromFilter(
+	return c.performActionOnBinaryDataFromFilter(ctx,
 		func(ctx context.Context, id string) error {
 			_, err := c.dataClient.RemoveTagsFromBinaryDataByIDs(ctx,
 				&datapb.RemoveTagsFromBinaryDataByIDsRequest{Tags: tags, BinaryDataIds: []string{id}})
@@ -1369,7 +1375,7 @@ func DataAddToDatasetByFilter(ctx context.Context, cmd *cli.Command, args dataAd
 func (c *viamClient) dataAddToDatasetByFilter(ctx context.Context, filter *datapb.Filter, datasetID string) error {
 	parallelActions := uint(100)
 
-	return c.performActionOnBinaryDataFromFilter(
+	return c.performActionOnBinaryDataFromFilter(ctx,
 		func(ctx context.Context, id string) error {
 			var err error
 			for attempt := 0; attempt < maxRetryCount; attempt++ {
@@ -1456,7 +1462,7 @@ func (c *viamClient) dataRemoveFromDatasetByFilter(ctx context.Context, filter *
 	}
 	parallelActions := uint(100)
 
-	return c.performActionOnBinaryDataFromFilter(
+	return c.performActionOnBinaryDataFromFilter(ctx,
 		func(ctx context.Context, id string) error {
 			_, err := c.dataClient.RemoveBinaryDataFromDatasetByIDs(ctx,
 				&datapb.RemoveBinaryDataFromDatasetByIDsRequest{DatasetId: datasetID, BinaryDataIds: []string{id}})

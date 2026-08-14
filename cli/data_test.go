@@ -444,6 +444,40 @@ func TestParallelFlagRejectsZero(t *testing.T) {
 	test.That(t, found, test.ShouldEqual, 3)
 }
 
+// TestDataExportBinaryCancelsProducerOnActionError guards a deadlock: when an action fails, the
+// workers cancel and return, so a producer sending bare into the id channel blocks forever on a
+// buffer nobody is draining and the command hangs instead of reporting the error. Uses more ids
+// than the channel buffer (parallel=2) so the producer is guaranteed to still be sending.
+// Regression: this test times out if getMatchingBinaryIDs stops selecting on ctx.
+func TestDataExportBinaryCancelsProducerOnActionError(t *testing.T) {
+	page := &datapb.BinaryDataByFilterResponse{}
+	for range 500 {
+		page.Data = append(page.Data, &datapb.BinaryData{
+			Metadata: &datapb.BinaryMetadata{BinaryDataId: "bin-1", FileName: "bin-1.jpg", FileExt: ".jpg"},
+		})
+	}
+	dsc := &inject.DataServiceClient{
+		// Always a full page, so the producer keeps trying to send.
+		BinaryDataByFilterFunc: func(_ context.Context, _ *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.BinaryDataByFilterResponse, error) {
+			return page, nil
+		},
+	}
+	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+	_ = cCtx
+
+	err := ac.performActionOnBinaryDataIDs(context.Background(),
+		func(ctx context.Context, ids chan<- string) error {
+			return getMatchingBinaryIDs(ctx, ac.dataClient, &datapb.Filter{PartId: "p1"}, ids, maxLimit)
+		},
+		func(_ context.Context, _ string) error { return errors.New("action failed") },
+		2,
+		func(int32) {},
+	)
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "action failed")
+}
+
 func TestDataQueryBinaryAction(t *testing.T) {
 	page := &datapb.BinaryDataByFilterResponse{
 		Data: []*datapb.BinaryData{

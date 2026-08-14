@@ -286,7 +286,7 @@ func (c *viamClient) downloadDataset(
 		return fmt.Errorf("%s does not match any dataset IDs", datasetID)
 	}
 
-	return c.performActionOnBinaryDataFromFilter(
+	return c.performActionOnBinaryDataFromFilter(ctx,
 		func(ctx context.Context, id string) error {
 			var downloadErr error
 			var datasetFilePath string
