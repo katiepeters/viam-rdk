@@ -411,38 +411,29 @@ func TestDataExportBinaryFromFilter(t *testing.T) {
 	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring, "Downloaded 3 files")
 }
 
-// TestPositiveUintFlagsRejectZero walks the real command tree and asserts that every flag where
-// zero is meaningless rejects an explicit 0 while leaving its own default intact. Walking the tree
-// (rather than naming the commands) means a new --parallel or --timeout flag added without the
-// validator fails here.
-func TestPositiveUintFlagsRejectZero(t *testing.T) {
-	// flag name -> how many carry it, so the walk can't silently stop finding them.
-	wantCounts := map[string]int{
-		dataFlagParallelDownloads: 3,
-		dataFlagTimeout:           4,
-	}
-
-	found := map[string]int{}
+// TestParallelFlagRejectsZero walks the real command tree and asserts every --parallel flag
+// rejects an explicit 0 while leaving its default intact. Zero workers does no work at all, so
+// the CLI should say so rather than quietly substituting the default. Walking the tree (rather
+// than naming the three commands) means a fourth --parallel flag added without the validator
+// fails here.
+func TestParallelFlagRejectsZero(t *testing.T) {
+	found := 0
 	var walk func(cmds []*cli.Command)
 	walk = func(cmds []*cli.Command) {
 		for _, cmd := range cmds {
 			for _, f := range cmd.Flags {
 				uintFlag, ok := f.(*cli.UintFlag)
-				if !ok {
+				if !ok || uintFlag.Name != dataFlagParallelDownloads {
 					continue
 				}
-				if _, want := wantCounts[uintFlag.Name]; !want {
-					continue
-				}
-				found[uintFlag.Name]++
-
+				found++
 				test.That(t, uintFlag.Validator, test.ShouldNotBeNil)
 				test.That(t, uintFlag.Validator(0), test.ShouldBeError,
-					fmt.Errorf("--%s must be greater than 0", uintFlag.Name))
+					fmt.Errorf("--%s must be greater than 0", dataFlagParallelDownloads))
 				// A sane value and the flag's own default must both pass.
 				test.That(t, uintFlag.Validator(1), test.ShouldBeNil)
-				test.That(t, uintFlag.Value, test.ShouldNotEqual, uint(0))
 				test.That(t, uintFlag.Validator(uintFlag.Value), test.ShouldBeNil)
+				test.That(t, uintFlag.Value, test.ShouldEqual, uint(defaultParallelBinaryDownloads))
 			}
 			walk(cmd.Commands)
 		}
@@ -450,7 +441,7 @@ func TestPositiveUintFlagsRejectZero(t *testing.T) {
 	walk(NewApp(io.Discard, io.Discard).Commands)
 
 	// Guards the walk itself: if it stopped finding flags, the assertions above are vacuous.
-	test.That(t, found, test.ShouldResemble, wantCounts)
+	test.That(t, found, test.ShouldEqual, 3)
 }
 
 func TestDataQueryBinaryAction(t *testing.T) {

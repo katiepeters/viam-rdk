@@ -729,7 +729,7 @@ func (c *viamClient) performActionOnBinaryDataFromFilter(actionOnBinaryData func
 // fetchIDsInto owns closing the channel it is given. Each time `logEveryN` actions have been performed, printStatement
 // logs how much binary data has been processed thus far. The first error cancels the remaining work.
 func (c *viamClient) performActionOnBinaryDataIDs(ctx context.Context,
-	produceIDs func(ctx context.Context, ids chan<- string) error,
+	fetchIDsInto func(ctx context.Context, ids chan<- string) error,
 	actionOnBinaryData func(string) error, parallelActions uint, printStatement func(int32),
 ) error {
 	ids := make(chan string, parallelActions)
@@ -744,7 +744,7 @@ func (c *viamClient) performActionOnBinaryDataIDs(ctx context.Context,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := produceIDs(ctx, ids); err != nil {
+		if err := fetchIDsInto(ctx, ids); err != nil {
 			errs <- err
 			cancel()
 		}

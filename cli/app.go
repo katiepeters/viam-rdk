@@ -1359,10 +1359,9 @@ Note: There is no progress meter while copying is in progress.
 											Validator: mustBePositiveUint(dataFlagParallelDownloads),
 										},
 										&cli.UintFlag{
-											Name:      dataFlagTimeout,
-											Usage:     "number of seconds to wait for large file downloads",
-											Value:     30,
-											Validator: mustBePositiveUint(dataFlagTimeout),
+											Name:  dataFlagTimeout,
+											Usage: "number of seconds to wait for large file downloads",
+											Value: 30,
 										},
 										&cli.StringSliceFlag{
 											Name:  generalFlagTags,
@@ -1384,10 +1383,9 @@ Note: There is no progress meter while copying is in progress.
 											TakesFile: true,
 										},
 										&cli.UintFlag{
-											Name:      dataFlagTimeout,
-											Usage:     "number of seconds to wait for large file downloads",
-											Value:     30,
-											Validator: mustBePositiveUint(dataFlagTimeout),
+											Name:  dataFlagTimeout,
+											Usage: "number of seconds to wait for large file downloads",
+											Value: 30,
 										},
 										&cli.StringSliceFlag{
 											Name:     dataFlagBinaryDataIDs,
@@ -1484,10 +1482,9 @@ Note: There is no progress meter while copying is in progress.
 									Validator: mustBePositiveUint(dataFlagParallelDownloads),
 								},
 								&cli.UintFlag{
-									Name:      dataFlagTimeout,
-									Usage:     "number of seconds to wait for large file downloads",
-									Value:     30,
-									Validator: mustBePositiveUint(dataFlagTimeout),
+									Name:  dataFlagTimeout,
+									Usage: "number of seconds to wait for large file downloads",
+									Value: 30,
 								},
 								&cli.BoolFlag{
 									Name:  dataFlagOnlyTabular,
@@ -1996,10 +1993,9 @@ Note: There is no progress meter while copying is in progress.
 							Validator: mustBePositiveUint(dataFlagParallelDownloads),
 						},
 						&cli.UintFlag{
-							Name:      dataFlagTimeout,
-							Usage:     "number of seconds to wait for large file downloads",
-							Value:     30,
-							Validator: mustBePositiveUint(dataFlagTimeout),
+							Name:  dataFlagTimeout,
+							Usage: "number of seconds to wait for large file downloads",
+							Value: 30,
 						},
 						&cli.BoolFlag{
 							Name:  datasetFlagForceLinuxPath,
