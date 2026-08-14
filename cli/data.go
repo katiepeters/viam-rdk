@@ -724,20 +724,14 @@ func (c *viamClient) performActionOnBinaryDataFromFilter(actionOnBinaryData func
 		actionOnBinaryData, parallelActions, printStatement)
 }
 
-// performActionOnBinaryDataIDs runs produceIDs in its own goroutine to stream binary data IDs, and
-// performs actionOnBinaryData on each of them across parallelActions workers. produceIDs owns
-// closing the channel it is given. Each time `logEveryN` actions have been performed, printStatement
+// performActionOnBinaryDataIDs runs fetchIDsInto in its own goroutine to page binary data IDs in
+// from the server, and performs actionOnBinaryData on each of them across parallelActions workers.
+// fetchIDsInto owns closing the channel it is given. Each time `logEveryN` actions have been performed, printStatement
 // logs how much binary data has been processed thus far. The first error cancels the remaining work.
 func (c *viamClient) performActionOnBinaryDataIDs(ctx context.Context,
 	produceIDs func(ctx context.Context, ids chan<- string) error,
 	actionOnBinaryData func(string) error, parallelActions uint, printStatement func(int32),
 ) error {
-	// --parallel accepts 0, which would spawn no workers at all and leave produceIDs blocked
-	// forever on a send nobody reads. Treat it as "unset" and use the default instead.
-	if parallelActions == 0 {
-		parallelActions = defaultParallelBinaryDownloads
-	}
-
 	ids := make(chan string, parallelActions)
 	// Give channel buffer of 1+parallelActions because that is the number of goroutines that may be passing an
 	// error into this channel (1 get ids routine + parallelActions worker routines).

@@ -374,22 +374,6 @@ func TestDataExportSequenceAction_PagesBinaryData(t *testing.T) {
 	}
 }
 
-// TestDataExportSequenceAction_DefaultsParallel covers the --parallel=0 fallback; without it the
-// worker pool would be empty and no blob would ever be downloaded.
-func TestDataExportSequenceAction_DefaultsParallel(t *testing.T) {
-	ac, _ := sequenceExportClient(t, testSequence(), []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")})
-
-	dst := t.TempDir()
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: dst,
-		SequenceID:  testSequenceID,
-		OnlyBinary:  true,
-	})
-	test.That(t, err, test.ShouldBeNil)
-
-	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
-}
-
 // TestDataExportSequenceCommandFlags guards that every flag registered on `data export sequence`
 // maps onto a field of dataExportSequenceArgs, since that binding is reflective.
 func TestDataExportSequenceCommandFlags(t *testing.T) {

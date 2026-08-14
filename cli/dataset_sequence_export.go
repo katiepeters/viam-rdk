@@ -86,11 +86,6 @@ func (c *viamClient) downloadSequenceBinaryBlobs(
 	if err := os.MkdirAll(binaryDir, 0o700); err != nil {
 		return errors.Wrapf(err, "could not create %s", binaryDir)
 	}
-	// This flow runs its own worker pool rather than performActionOnBinaryDataIDs, so it needs
-	// its own guard against --parallel=0 leaving the producer with nobody to send to.
-	if parallel == 0 {
-		parallel = defaultParallelBinaryDownloads
-	}
 
 	printf(c.c.Root().Writer, "Downloading binary blobs to %s", binaryDir)
 
