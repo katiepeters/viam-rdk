@@ -802,8 +802,6 @@ func getMatchingBinaryIDs(ctx context.Context, client datapb.DataServiceClient, 
 	defer close(ids)
 	return forEachBinaryDataByFilter(ctx, client, filter, uint64(limit),
 		func(bd *datapb.BinaryData) (bool, error) {
-			// Select on ctx rather than sending bare: when an action fails, the workers cancel and
-			// return, and a bare send would then block forever on a full channel nobody is reading.
 			select {
 			case ids <- bd.GetMetadata().GetBinaryDataId():
 				return false, nil
@@ -1104,8 +1102,8 @@ func (c *viamClient) tabularData(dest string, request *datapb.ExportTabularDataR
 	return c.tabularDataToFile(filepath.Join(dest, dataFileName), request)
 }
 
-// tabularDataToFile streams the tabular export for request into dataFilePath, creating or
-// truncating it. The parent directory must already exist. Callers that export several requests
+// tabularDataToFile streams the tabular export for request into dataFilePath, overwriting whatever
+// is already there. The parent directory must already exist. Callers that export several requests
 // (e.g. one per resource of a sequence) use this directly so each gets its own file.
 func (c *viamClient) tabularDataToFile(dataFilePath string, request *datapb.ExportTabularDataRequest) error {
 	fmt.Fprintf(c.c.Root().Writer, "Downloading..") //nolint:errcheck

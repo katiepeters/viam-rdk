@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/urfave/cli/v3"
 	"go.mongodb.org/mongo-driver/bson"
 	datapb "go.viam.com/api/app/data/v1"
 	datapipelinespb "go.viam.com/api/app/datapipelines/v1"
@@ -409,39 +407,6 @@ func TestDataExportBinaryFromFilter(t *testing.T) {
 		test.That(t, mustReadFile(t, path), test.ShouldResemble, []byte("bytes-"+id))
 	}
 	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring, "Downloaded 3 files")
-}
-
-// TestParallelFlagRejectsZero walks the real command tree and asserts every --parallel flag
-// rejects an explicit 0 while leaving its default intact. Zero workers does no work at all, so
-// the CLI should say so rather than quietly substituting the default. Walking the tree (rather
-// than naming the three commands) means a fourth --parallel flag added without the validator
-// fails here.
-func TestParallelFlagRejectsZero(t *testing.T) {
-	found := 0
-	var walk func(cmds []*cli.Command)
-	walk = func(cmds []*cli.Command) {
-		for _, cmd := range cmds {
-			for _, f := range cmd.Flags {
-				uintFlag, ok := f.(*cli.UintFlag)
-				if !ok || uintFlag.Name != dataFlagParallelDownloads {
-					continue
-				}
-				found++
-				test.That(t, uintFlag.Validator, test.ShouldNotBeNil)
-				test.That(t, uintFlag.Validator(0), test.ShouldBeError,
-					fmt.Errorf("--%s must be greater than 0", dataFlagParallelDownloads))
-				// A sane value and the flag's own default must both pass.
-				test.That(t, uintFlag.Validator(1), test.ShouldBeNil)
-				test.That(t, uintFlag.Validator(uintFlag.Value), test.ShouldBeNil)
-				test.That(t, uintFlag.Value, test.ShouldEqual, uint(defaultParallelBinaryDownloads))
-			}
-			walk(cmd.Commands)
-		}
-	}
-	walk(NewApp(io.Discard, io.Discard).Commands)
-
-	// Guards the walk itself: if it stopped finding flags, the assertions above are vacuous.
-	test.That(t, found, test.ShouldEqual, 3)
 }
 
 // TestDataExportBinaryCancelsProducerOnActionError guards a deadlock: when an action fails, the

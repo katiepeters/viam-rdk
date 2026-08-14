@@ -127,8 +127,8 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 func (c *viamClient) resolveResourceSubtype(
 	ctx context.Context, partID string, resource *datapb.SequenceResourceFilter, interval *datapb.CaptureInterval,
 ) (string, error) {
-	//nolint:staticcheck // TabularDataByFilter is deprecated, but it is the only call that maps a
-	// resource name to its subtype; every newer tabular RPC takes the subtype as an input.
+	//nolint:staticcheck // TabularDataByFilter is deprecated, but we are using this to get the missing subtype.
+	// We can safely remove if/when we update sequence resources to record subtypes.
 	resp, err := c.dataClient.TabularDataByFilter(ctx, &datapb.TabularDataByFilterRequest{
 		DataRequest: &datapb.DataRequest{
 			Filter: &datapb.Filter{
@@ -139,7 +139,6 @@ func (c *viamClient) resolveResourceSubtype(
 			},
 			Limit: 1,
 		},
-		CountOnly: false,
 	})
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to look up the subtype of resource %q method %q",
