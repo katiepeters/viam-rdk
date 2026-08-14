@@ -41,8 +41,7 @@ func DataExportSequenceAction(ctx context.Context, cmd *cli.Command, args dataEx
 	return client.dataExportSequenceAction(ctx, args)
 }
 
-// dataExportSequenceAction exports a sequence's tabular data, for each resource it covers over its
-// capture interval, plus the binary data it references.
+// dataExportSequenceAction exports a sequence's binary and tabular data.
 func (c *viamClient) dataExportSequenceAction(ctx context.Context, args dataExportSequenceArgs) error {
 	if args.OnlyTabular && args.OnlyBinary {
 		return errors.Errorf("--%s and --%s cannot both be provided", dataFlagOnlyTabular, dataFlagOnlyBinary)
@@ -186,32 +185,29 @@ func sanitizeForFileName(s string) string {
 	return strings.Trim(unsafeFileNameChars.ReplaceAllString(s, "_"), "_.")
 }
 
-// exportSequenceBinary downloads every binary datum the sequence references into dst/binary,
-// using the same layout and parallel-download machinery as `data export binary`. Rooting it at
-// binary/ keeps it a sibling of tabular/ rather than mixing data/ and metadata/ into the top
-// level of the destination.
+// exportSequenceBinary downloads every binary datum the sequence references into <destination>/binary,
+// using the same layout and parallel-download machinery as `data export binary`.
 func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst string, parallel, timeout uint) error {
 	binaryDst := filepath.Join(dst, sequenceBinaryExportDir)
 
+	streamIDs := func(ctx context.Context, ids chan<- string) error {
+		defer close(ids)
+		return forEachSequenceBinaryData(ctx, c.dataClient, sequenceID, func(bd *datapb.BinaryData) error {
+			select {
+			case ids <- bd.GetMetadata().GetBinaryDataId():
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}
+	download := func(ctx context.Context, id string) error {
+		return c.downloadBinary(ctx, binaryDst, timeout, id)
+	}
+	reportProgress := func(i int32) {
+		printf(c.c.Root().Writer, "Downloaded %d files", i)
+	}
+
 	printf(c.c.Root().Writer, "Downloading binary data for sequence %s to %s", sequenceID, binaryDst)
-	return c.performActionOnBinaryDataIDs(ctx,
-		func(ctx context.Context, ids chan<- string) error {
-			defer close(ids)
-			return forEachSequenceBinaryData(ctx, c.dataClient, sequenceID, func(bd *datapb.BinaryData) error {
-				select {
-				case ids <- bd.GetMetadata().GetBinaryDataId():
-					return nil
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			})
-		},
-		func(id string) error {
-			return c.downloadBinary(ctx, binaryDst, timeout, id)
-		},
-		parallel,
-		func(i int32) {
-			printf(c.c.Root().Writer, "Downloaded %d files", i)
-		},
-	)
+	return c.performActionOnBinaryDataIDs(ctx, streamIDs, download, parallel, reportProgress)
 }

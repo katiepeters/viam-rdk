@@ -287,7 +287,7 @@ func (c *viamClient) downloadDataset(
 	}
 
 	return c.performActionOnBinaryDataFromFilter(
-		func(id string) error {
+		func(ctx context.Context, id string) error {
 			var downloadErr error
 			var datasetFilePath string
 			if !onlyJSONLines {
