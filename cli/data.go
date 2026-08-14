@@ -43,6 +43,9 @@ const (
 
 	defaultParallelBinaryDownloads = 100
 
+	// tabularProgressEveryNRows is how often a tabular export reports its running row count.
+	tabularProgressEveryNRows = 100
+
 	dataCommandAdd    = "add"
 	dataCommandRemove = "remove"
 
@@ -1099,16 +1102,28 @@ func (c *viamClient) tabularData(dest string, request *datapb.ExportTabularDataR
 		return errors.Wrapf(err, "could not create destination directories")
 	}
 
-	return c.tabularDataToFile(filepath.Join(dest, dataFileName), request)
+	fmt.Fprintf(c.c.Root().Writer, "Downloading..") //nolint:errcheck
+	_, err := c.tabularDataToFile(filepath.Join(dest, dataFileName), request, c.c.Root().Writer, nil)
+	return err
 }
 
 // tabularDataToFile streams the tabular export for request into dataFilePath, overwriting whatever
 // is already there. The parent directory must already exist. Callers that export several requests
 // (e.g. one per resource of a sequence) use this directly so each gets its own file.
-func (c *viamClient) tabularDataToFile(dataFilePath string, request *datapb.ExportTabularDataRequest) error {
-	fmt.Fprintf(c.c.Root().Writer, "Downloading..") //nolint:errcheck
-
+//
+// One '.' is written to progress per attempt, followed by a newline, so a caller can print an
+// unterminated line first and have the progress attach to it. Pass io.Discard to render nothing.
+//
+// onRows, when non-nil, is called with the running row count every tabularProgressEveryNRows rows,
+// letting the caller render live progress however it likes. Returns the number of rows written by
+// the attempt that succeeded.
+func (c *viamClient) tabularDataToFile(
+	dataFilePath string, request *datapb.ExportTabularDataRequest, progress io.Writer, onRows func(rows int),
+) (int, error) {
+	var rows int
 	for count := 0; count < maxRetryCount; count++ {
+		// Each attempt recreates the file from scratch, so the row count restarts with it.
+		rows = 0
 		err := func() error {
 			dataFile, err := os.Create(dataFilePath) //nolint:gosec
 			if err != nil {
@@ -1142,10 +1157,10 @@ func (c *viamClient) tabularDataToFile(dataFilePath string, request *datapb.Expo
 				}
 			}()
 
+			fmt.Fprintf(progress, ".") //nolint:errcheck // Adds '.' to 'Downloading..' output.
+
 			go func() {
 				defer close(dataRowChan)
-				fmt.Fprintf(c.c.Root().Writer, ".") //nolint:errcheck // Adds '.' to 'Downloading..' output.
-
 				stream, err := c.dataClient.ExportTabularData(ctx, request)
 				if err != nil {
 					errChan <- errors.Wrap(err, "failed to export tabular data")
@@ -1199,6 +1214,10 @@ func (c *viamClient) tabularDataToFile(dataFilePath string, request *datapb.Expo
 						exportErr = errors.Wrap(err, "error writing data")
 						return exportErr
 					}
+					rows++
+					if onRows != nil && rows%tabularProgressEveryNRows == 0 {
+						onRows(rows)
+					}
 				case err := <-errChan:
 					exportErr = err
 					return err
@@ -1213,11 +1232,11 @@ func (c *viamClient) tabularDataToFile(dataFilePath string, request *datapb.Expo
 			continue
 		}
 
-		printf(c.c.Root().Writer, "") // newline
-		return err
+		printf(progress, "") // newline
+		return rows, err
 	}
 
-	return nil
+	return rows, nil
 }
 
 func writeData(writer *bufio.Writer, dataRow []byte) error {

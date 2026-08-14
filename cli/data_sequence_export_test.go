@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,8 +166,8 @@ func TestDataExportSequenceAction_SurfacesMissingSequence(t *testing.T) {
 
 func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
 	sequence := testSequence(
-		sequenceResource("camera-1", "ReadImage"),
 		sequenceResource("sensor-1", "Readings"),
+		sequenceResource("power_sensor-1", "Voltage"),
 	)
 	ac, tabularRequests := sequenceExportClient(t, sequence, nil)
 
@@ -185,23 +186,23 @@ func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
 		test.That(t, req.GetInterval().GetStart().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceStart)
 		test.That(t, req.GetInterval().GetEnd().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceEnd)
 	}
-	test.That(t, (*tabularRequests)[0].GetResourceName(), test.ShouldEqual, "camera-1")
-	test.That(t, (*tabularRequests)[0].GetMethodName(), test.ShouldEqual, "ReadImage")
-	test.That(t, (*tabularRequests)[1].GetResourceName(), test.ShouldEqual, "sensor-1")
-	test.That(t, (*tabularRequests)[1].GetMethodName(), test.ShouldEqual, "Readings")
+	test.That(t, (*tabularRequests)[0].GetResourceName(), test.ShouldEqual, "sensor-1")
+	test.That(t, (*tabularRequests)[0].GetMethodName(), test.ShouldEqual, "Readings")
+	test.That(t, (*tabularRequests)[1].GetResourceName(), test.ShouldEqual, "power_sensor-1")
+	test.That(t, (*tabularRequests)[1].GetMethodName(), test.ShouldEqual, "Voltage")
 
 	// Each resource carries its own resolved subtype rather than one value applied to all of them.
-	test.That(t, (*tabularRequests)[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:camera-1")
-	test.That(t, (*tabularRequests)[1].GetResourceSubtype(), test.ShouldEqual, "rdk:component:sensor-1")
+	test.That(t, (*tabularRequests)[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:sensor-1")
+	test.That(t, (*tabularRequests)[1].GetResourceSubtype(), test.ShouldEqual, "rdk:component:power_sensor-1")
 
 	// Each resource lands in its own NDJSON file rather than overwriting a shared one.
-	cameraRows := readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "camera-1-ReadImage.ndjson"))
+	cameraRows := readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "sensor-1-Readings.ndjson"))
 	test.That(t, len(cameraRows), test.ShouldEqual, 1)
-	test.That(t, cameraRows[0]["resourceName"], test.ShouldEqual, "camera-1")
+	test.That(t, cameraRows[0]["resourceName"], test.ShouldEqual, "sensor-1")
 
-	sensorRows := readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "sensor-1-Readings.ndjson"))
+	sensorRows := readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "power_sensor-1-Voltage.ndjson"))
 	test.That(t, len(sensorRows), test.ShouldEqual, 1)
-	test.That(t, sensorRows[0]["resourceName"], test.ShouldEqual, "sensor-1")
+	test.That(t, sensorRows[0]["resourceName"], test.ShouldEqual, "power_sensor-1")
 
 	// --only-tabular means no binary data directory.
 	_, err = os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
@@ -225,7 +226,7 @@ func TestDataExportSequenceAction_SkipsTabularWhenNoResources(t *testing.T) {
 }
 
 func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
-	sequence := testSequence(sequenceResource("camera-1", "ReadImage"))
+	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
 	binary := []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg"), mkBinaryData("bd-2", ".jpg")}
 	ac, tabularRequests := sequenceExportClient(t, sequence, binary)
 
@@ -255,7 +256,7 @@ func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
 }
 
 func TestDataExportSequenceAction_ExportsTabularAndBinaryByDefault(t *testing.T) {
-	sequence := testSequence(sequenceResource("camera-1", "ReadImage"))
+	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
 	ac, tabularRequests := sequenceExportClient(t, sequence, []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")})
 
 	dst := t.TempDir()
@@ -267,7 +268,7 @@ func TestDataExportSequenceAction_ExportsTabularAndBinaryByDefault(t *testing.T)
 	test.That(t, err, test.ShouldBeNil)
 
 	test.That(t, len(*tabularRequests), test.ShouldEqual, 1)
-	test.That(t, len(readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "camera-1-ReadImage.ndjson"))), test.ShouldEqual, 1)
+	test.That(t, len(readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "sensor-1-Readings.ndjson"))), test.ShouldEqual, 1)
 
 	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
 }
@@ -277,7 +278,7 @@ func TestDataExportSequenceAction_ExportsTabularAndBinaryByDefault(t *testing.T)
 // one, the resource is skipped rather than exported with a blank subtype.
 func TestDataExportSequenceAction_SkipsResourceWithNoData(t *testing.T) {
 	sequence := testSequence(
-		sequenceResource("camera-1", "ReadImage"),
+		sequenceResource("sensor-1", "Readings"),
 		sequenceResource("ghost-1", "Readings"),
 	)
 
@@ -319,7 +320,7 @@ func TestDataExportSequenceAction_SkipsResourceWithNoData(t *testing.T) {
 
 	// Only the resource with data was exported, and it carries the resolved subtype.
 	test.That(t, len(tabularRequests), test.ShouldEqual, 1)
-	test.That(t, tabularRequests[0].GetResourceName(), test.ShouldEqual, "camera-1")
+	test.That(t, tabularRequests[0].GetResourceName(), test.ShouldEqual, "sensor-1")
 	test.That(t, tabularRequests[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:camera")
 
 	// No file is written for the skipped resource.
@@ -328,7 +329,7 @@ func TestDataExportSequenceAction_SkipsResourceWithNoData(t *testing.T) {
 }
 
 func TestDataExportSequenceAction_SurfacesSubtypeLookupErrors(t *testing.T) {
-	sequence := testSequence(sequenceResource("camera-1", "ReadImage"))
+	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
 	dsc := &inject.DataServiceClient{
 		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
 		) (*datapb.GetSequenceResponse, error) {
@@ -349,12 +350,179 @@ func TestDataExportSequenceAction_SurfacesSubtypeLookupErrors(t *testing.T) {
 		OnlyTabular: true,
 	})
 	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "camera-1")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
 	test.That(t, err.Error(), test.ShouldContainSubstring, "lookup boom")
 }
 
+// TestDataExportSequenceAction_BinaryLogging pins what gets logged around binary data. The
+// "Downloading binary data ... to <dst>/binary" line used to print unconditionally, before
+// anything was known about whether the sequence had any -- naming a directory that is only created
+// once there is something to write into it. At zero files the driver's own progress print is
+// skipped too (0 % logEveryN == 0), so the run ended on a claim that never came true.
+func TestDataExportSequenceAction_BinaryLogging(t *testing.T) {
+	newClient := func(t *testing.T, binary []*datapb.BinaryData) (*viamClient, *testWriter) {
+		t.Helper()
+		dsc := &inject.DataServiceClient{
+			GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
+			) (*datapb.GetSequenceResponse, error) {
+				return &datapb.GetSequenceResponse{Sequence: testSequence()}, nil
+			},
+			GetSequenceBinaryDataFunc: func(_ context.Context, _ *datapb.GetSequenceBinaryDataRequest, _ ...grpc.CallOption,
+			) (*datapb.GetSequenceBinaryDataResponse, error) {
+				return &datapb.GetSequenceBinaryDataResponse{Data: binary}, nil
+			},
+			BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
+			) (*datapb.BinaryDataByIDsResponse, error) {
+				resp := &datapb.BinaryDataByIDsResponse{}
+				for _, id := range in.GetBinaryDataIds() {
+					datum := &datapb.BinaryData{Metadata: sequenceBinaryMeta(id)}
+					if in.GetIncludeBinary() {
+						datum.Binary = []byte("bytes-" + id)
+					}
+					resp.Data = append(resp.Data, datum)
+				}
+				return resp, nil
+			},
+		}
+		_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+		return ac, out
+	}
+
+	t.Run("says so when the sequence has no binary data", func(t *testing.T) {
+		ac, out := newClient(t, nil)
+		dst := t.TempDir()
+
+		err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
+			Destination: dst, SequenceID: testSequenceID, Parallel: 2, OnlyBinary: true,
+		})
+		test.That(t, err, test.ShouldBeNil)
+
+		logged := strings.Join(out.messages, "")
+		test.That(t, logged, test.ShouldContainSubstring, "Binary data (binary/):\n  none")
+
+		// The claim has to match the disk: nothing was written, so binary/ must not exist.
+		_, statErr := os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
+		test.That(t, os.IsNotExist(statErr), test.ShouldBeTrue)
+	})
+
+	t.Run("announces the download when there is binary data", func(t *testing.T) {
+		blob := mkBinaryData("bd-1", ".jpg")
+		blob.Metadata.CaptureMetadata = &datapb.CaptureMetadata{ComponentName: "camera-1", MethodName: "GetImages"}
+		ac, out := newClient(t, []*datapb.BinaryData{blob})
+		dst := t.TempDir()
+
+		err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
+			Destination: dst, SequenceID: testSequenceID, Parallel: 2, OnlyBinary: true,
+		})
+		test.That(t, err, test.ShouldBeNil)
+
+		logged := strings.Join(out.messages, "")
+		// Counted against the resource it came from, matching how the tabular section reads.
+		test.That(t, logged, test.ShouldContainSubstring, "Binary data (binary/):\n  camera-1 GetImages: 1 files")
+		test.That(t, logged, test.ShouldNotContainSubstring, "none")
+		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
+	})
+}
+
+// TestDataExportSequenceAction_SkipsBinaryCaptureMethods covers the classifier: a camera captures
+// binary, so its resource has no tabular data by definition. It should cost no subtype lookup and
+// produce no output here -- the binary half of the export is what covers those resources.
+func TestDataExportSequenceAction_SkipsBinaryCaptureMethods(t *testing.T) {
+	sequence := testSequence(
+		sequenceResource("camera-1", "GetImages"),
+		sequenceResource("camera-2", "ReadImage"),
+		sequenceResource("sensor-1", "Readings"),
+	)
+
+	var mu sync.Mutex
+	var lookedUp, exported []string
+	dsc := &inject.DataServiceClient{
+		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
+		) (*datapb.GetSequenceResponse, error) {
+			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
+		},
+		//nolint:staticcheck
+		TabularDataByFilterFunc: func(_ context.Context, in *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
+		) (*datapb.TabularDataByFilterResponse, error) {
+			mu.Lock()
+			lookedUp = append(lookedUp, in.GetDataRequest().GetFilter().GetComponentName())
+			mu.Unlock()
+			return &datapb.TabularDataByFilterResponse{
+				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:sensor"}},
+			}, nil
+		},
+		ExportTabularDataFunc: func(_ context.Context, in *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
+		) (datapb.DataService_ExportTabularDataClient, error) {
+			mu.Lock()
+			exported = append(exported, in.GetResourceName())
+			mu.Unlock()
+			return newMockExportStream([]*datapb.ExportTabularDataResponse{{LocationId: "loc"}}, nil), nil
+		},
+	}
+	_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+
+	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
+		Destination: t.TempDir(), SequenceID: testSequenceID, OnlyTabular: true,
+	})
+	test.That(t, err, test.ShouldBeNil)
+
+	// Binary capture methods cost no lookup and produce no export.
+	test.That(t, lookedUp, test.ShouldResemble, []string{"sensor-1"})
+	test.That(t, exported, test.ShouldResemble, []string{"sensor-1"})
+
+	// Skipped silently: the binary half covers these resources, so naming them here is noise, and
+	// they must not be reported as if the resource had no data.
+	logged := strings.Join(out.messages, "")
+	test.That(t, logged, test.ShouldNotContainSubstring, "camera-1")
+	test.That(t, logged, test.ShouldNotContainSubstring, "camera-2")
+	test.That(t, logged, test.ShouldNotContainSubstring, "no tabular data")
+}
+
+func TestProgressLine(t *testing.T) {
+	t.Run("redraws in place on a terminal", func(t *testing.T) {
+		var buf bytes.Buffer
+		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: " (%d rows)", terminal: true}
+		line.start()
+		line.update(100)
+		line.finish(250)
+
+		test.That(t, buf.String(), test.ShouldEqual,
+			"  cam Readings: cam.ndjson"+
+				"\r  cam Readings: cam.ndjson (100 rows)"+
+				"\r  cam Readings: cam.ndjson (250 rows)\n")
+	})
+
+	t.Run("off a terminal writes the line once", func(t *testing.T) {
+		var buf bytes.Buffer
+		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: " (%d rows)"}
+		line.start()
+		line.update(100) // no cursor to move, so intermediate counts are dropped
+		line.finish(250)
+
+		test.That(t, buf.String(), test.ShouldEqual, "  cam Readings: cam.ndjson (250 rows)\n")
+	})
+
+	t.Run("writes a whole line when start was skipped", func(t *testing.T) {
+		var buf bytes.Buffer
+		line := &progressLine{w: &buf, prefix: "  ", tail: "%d files"}
+		line.finish(18)
+
+		test.That(t, buf.String(), test.ShouldEqual, "  18 files\n")
+	})
+
+	// The prefix is caller-supplied -- a resource can be named "rate%" -- so it must never be
+	// treated as a format string.
+	t.Run("does not interpret verbs in the prefix", func(t *testing.T) {
+		var buf bytes.Buffer
+		line := &progressLine{w: &buf, prefix: "  rate%s %d: f.ndjson", tail: " (%d rows)"}
+		line.finish(7)
+
+		test.That(t, buf.String(), test.ShouldEqual, "  rate%s %d: f.ndjson (7 rows)\n")
+	})
+}
+
 func TestDataExportSequenceAction_SurfacesTabularErrors(t *testing.T) {
-	sequence := testSequence(sequenceResource("camera-1", "ReadImage"))
+	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
 	dsc := &inject.DataServiceClient{
 		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
 		) (*datapb.GetSequenceResponse, error) {
@@ -381,7 +549,7 @@ func TestDataExportSequenceAction_SurfacesTabularErrors(t *testing.T) {
 		OnlyTabular: true,
 	})
 	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "camera-1")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
 	test.That(t, err.Error(), test.ShouldContainSubstring, "boom")
 }
 

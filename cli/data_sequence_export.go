@@ -2,14 +2,22 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"maps"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v3"
 	datapb "go.viam.com/api/app/data/v1"
+
+	"go.viam.com/rdk/data"
 )
 
 const (
@@ -59,6 +67,7 @@ func (c *viamClient) dataExportSequenceAction(ctx context.Context, args dataExpo
 	if err := makeDestinationDirs(args.Destination); err != nil {
 		return errors.Wrap(err, "could not create destination directory")
 	}
+	printf(c.c.Root().Writer, "Exporting sequence %s to %s", sequence.GetId(), args.Destination)
 
 	if !args.OnlyBinary {
 		if err := c.exportSequenceTabular(ctx, sequence, args.Destination); err != nil {
@@ -76,9 +85,12 @@ func (c *viamClient) dataExportSequenceAction(ctx context.Context, args dataExpo
 // exportSequenceTabular runs one tabular export per resource the sequence references, scoped to
 // the sequence's part and capture interval, writing each to its own NDJSON file under dst/tabular/.
 func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb.Sequence, dst string) error {
+	printf(c.c.Root().Writer, "")
+	printf(c.c.Root().Writer, "Tabular data (%s/):", sequenceTabularDir)
+
 	resources := sequence.GetResources()
 	if len(resources) == 0 {
-		printf(c.c.Root().Writer, "Sequence %s references no resources; skipping tabular export", sequence.GetId())
+		printf(c.c.Root().Writer, "  none")
 		return nil
 	}
 
@@ -90,12 +102,21 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 	interval := &datapb.CaptureInterval{Start: sequence.GetStartTime(), End: sequence.GetEndTime()}
 	names := sequenceTabularFileNames(resources)
 	for i, resource := range resources {
+		// A binary capture method (GetImages, ReadImage, NextPointCloud, ...) has no tabular data
+		// by definition. Skip silently -- the binary half of the export covers these resources, so
+		// naming them here would only be noise.
+		if data.MethodToCaptureType(resource.GetMethodName()) == data.CaptureTypeBinary {
+			continue
+		}
+
 		subtype, err := c.resolveResourceSubtype(ctx, sequence.GetPartId(), resource, interval)
 		if err != nil {
 			return err
 		}
 		if subtype == "" {
-			printf(c.c.Root().Writer, "No captured data for resource %q method %q in the sequence's interval; skipping",
+			// MethodToCaptureType defaults unknown methods to tabular, so a module's binary method
+			// that isn't on its list still reaches here; no rows means nothing to export either way.
+			printf(c.c.Root().Writer, "  %s %s: no tabular data in the sequence's interval, skipping",
 				resource.GetResourceName(), resource.GetMethodName())
 			continue
 		}
@@ -108,13 +129,20 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 			Interval:        interval,
 		}
 
-		path := filepath.Join(tabularDir, names[i])
-		printf(c.c.Root().Writer, "Exporting tabular data for resource %q method %q to %s",
-			resource.GetResourceName(), resource.GetMethodName(), path)
-		if err := c.tabularDataToFile(path, request); err != nil {
+		line := newProgressLine(c.c.Root().Writer,
+			fmt.Sprintf("  %s %s: %s", resource.GetResourceName(), resource.GetMethodName(), names[i]),
+			" (%d rows)")
+		line.start()
+
+		// io.Discard for the writer: its only output is a dot per retry attempt, which the row
+		// count supersedes. Progress comes through onRows instead.
+		rows, err := c.tabularDataToFile(filepath.Join(tabularDir, names[i]), request, io.Discard, line.update)
+		if err != nil {
+			line.abandon()
 			return errors.Wrapf(err, "failed to export tabular data for resource %q method %q",
 				resource.GetResourceName(), resource.GetMethodName())
 		}
+		line.finish(rows)
 	}
 	return nil
 }
@@ -122,8 +150,9 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 // resolveResourceSubtype discovers a resource's subtype, which ExportTabularData requires but a
 // SequenceResourceFilter does not record. It asks for a single captured row matching the same
 // part, resource, method, and interval the export will use, and reads the subtype off that row's
-// CaptureMetadata. Returns "" when the resource captured nothing in the interval, in which case
-// there is nothing to export for it either.
+// CaptureMetadata. Returns "" when the resource has no tabular data in the interval -- which is
+// the normal case for a binary-only resource such as a camera, so it means "nothing to export
+// here", not "this resource is empty".
 func (c *viamClient) resolveResourceSubtype(
 	ctx context.Context, partID string, resource *datapb.SequenceResourceFilter, interval *datapb.CaptureInterval,
 ) (string, error) {
@@ -180,33 +209,153 @@ func sequenceTabularFileNames(resources []*datapb.SequenceResourceFilter) []stri
 	return names
 }
 
+// progressLine renders a single line whose only changing part is a running count. On a terminal it
+// rewrites that line in place, so the count stays legible whether it counts to ten or ten million.
+// Piped or redirected there is no cursor to move, so carriage returns would just pile up in the
+// log; there the line is written once, when the count is final.
+type progressLine struct {
+	w        io.Writer
+	prefix   string
+	tail     string // a format taking the running count, e.g. " (%d rows)"
+	terminal bool
+	started  bool
+	width    int // characters last drawn, so erase knows how much to blank
+}
+
+func newProgressLine(w io.Writer, prefix, tail string) *progressLine {
+	return &progressLine{w: w, prefix: prefix, tail: tail, terminal: isTerminalOutput()}
+}
+
+// render builds the line by concatenation rather than one format string, because prefix is
+// caller-supplied (a resource name may well contain a '%').
+func (l *progressLine) render(count int) string {
+	return l.prefix + fmt.Sprintf(l.tail, count)
+}
+
+// start writes the prefix before any counting begins, so slow work is attributable while it runs.
+// Callers that cannot commit to a line yet (the count may end up zero) skip it.
+func (l *progressLine) start() {
+	l.started = true
+	fmt.Fprint(l.w, l.prefix) //nolint:errcheck
+}
+
+// update redraws the line with the running count. The count only grows, so a redraw never has to
+// clear characters left behind by a longer previous value.
+func (l *progressLine) update(count int) {
+	if l.terminal {
+		drawn := l.render(count)
+		l.width = len(drawn)
+		fmt.Fprint(l.w, "\r"+drawn) //nolint:errcheck
+	}
+}
+
+func (l *progressLine) finish(count int) {
+	switch {
+	case l.terminal:
+		fmt.Fprint(l.w, "\r"+l.render(count)+"\n") //nolint:errcheck
+	case l.started:
+		// The prefix is already on the line; only the count is outstanding.
+		fmt.Fprint(l.w, fmt.Sprintf(l.tail, count)+"\n") //nolint:errcheck
+	default:
+		fmt.Fprint(l.w, l.render(count)+"\n") //nolint:errcheck
+	}
+}
+
+// abandon closes the line so whatever follows starts on its own.
+func (l *progressLine) abandon() {
+	fmt.Fprintln(l.w) //nolint:errcheck
+}
+
+// erase removes the line entirely, for a caller that replaces a running total with a fuller
+// breakdown. Off a terminal nothing was drawn, so there is nothing to take back.
+func (l *progressLine) erase() {
+	if l.terminal {
+		fmt.Fprint(l.w, "\r"+strings.Repeat(" ", l.width)+"\r") //nolint:errcheck
+	}
+}
+
 func sanitizeForFileName(s string) string {
 	return strings.Trim(unsafeFileNameChars.ReplaceAllString(s, "_"), "_.")
 }
 
-// exportSequenceBinary downloads every binary datum the sequence references into <destination>/binary,
-// using the same layout and parallel-download machinery as `data export binary`.
+// exportSequenceBinary downloads every binary datum the sequence references into
+// <destination>/binary, using the same layout and parallel-download machinery as
+// `data export binary`, and reports the result per resource so the section reads like the
+// tabular one above it.
 func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst string, parallel, timeout uint) error {
 	binaryDst := filepath.Join(dst, sequenceBinaryExportDir)
+
+	// resourceOf is populated while paging and read by the download workers, so both sides take
+	// progressMu. Downloads run in parallel across resources, so a per-resource line cannot update
+	// live; a single running total does that, and the per-resource split is reported at the end.
+	var progressMu sync.Mutex
+	resourceOf := map[string]string{}
+	countByResource := map[string]int{}
+	var downloaded atomic.Int32
 
 	fetchIDsInto := func(ctx context.Context, ids chan<- string) error {
 		defer close(ids)
 		return forEachSequenceBinaryData(ctx, c.dataClient, sequenceID, func(bd *datapb.BinaryData) error {
+			id := bd.GetMetadata().GetBinaryDataId()
+
+			progressMu.Lock()
+			resourceOf[id] = sequenceResourceLabel(bd.GetMetadata().GetCaptureMetadata())
+			progressMu.Unlock()
+
 			select {
-			case ids <- bd.GetMetadata().GetBinaryDataId():
+			case ids <- id:
 				return nil
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		})
 	}
+
+	line := newProgressLine(c.c.Root().Writer, "  ", "%d files")
 	download := func(ctx context.Context, id string) error {
-		return c.downloadBinary(ctx, binaryDst, timeout, id)
-	}
-	reportProgress := func(i int32) {
-		printf(c.c.Root().Writer, "Downloaded %d files", i)
+		if err := c.downloadBinary(ctx, binaryDst, timeout, id); err != nil {
+			return err
+		}
+		total := downloaded.Add(1)
+
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		countByResource[resourceOf[id]]++
+		line.update(int(total))
+		return nil
 	}
 
-	printf(c.c.Root().Writer, "Downloading binary data for sequence %s to %s", sequenceID, binaryDst)
-	return c.performActionOnBinaryDataIDs(ctx, fetchIDsInto, download, parallel, reportProgress)
+	printf(c.c.Root().Writer, "")
+	printf(c.c.Root().Writer, "Binary data (%s/):", sequenceBinaryExportDir)
+	if err := c.performActionOnBinaryDataIDs(ctx, fetchIDsInto, download, parallel, func(int32) {}); err != nil {
+		line.erase()
+		return err
+	}
+	if downloaded.Load() == 0 {
+		printf(c.c.Root().Writer, "  none")
+		return nil
+	}
+
+	// Replace the running total with the per-resource split.
+	line.erase()
+	for _, resource := range slices.Sorted(maps.Keys(countByResource)) {
+		printf(c.c.Root().Writer, "  %s: %d files", resource, countByResource[resource])
+	}
+	return nil
+}
+
+// sequenceResourceLabel names the resource a datum was captured from, matching how the tabular
+// section labels its lines.
+func sequenceResourceLabel(meta *datapb.CaptureMetadata) string {
+	name, method := meta.GetComponentName(), meta.GetMethodName()
+	switch {
+	case name == "" && method == "":
+		return "unknown resource"
+	case method == "":
+		return name
+	case name == "":
+		return method
+	default:
+		return name + " " + method
+	}
 }
