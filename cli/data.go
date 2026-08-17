@@ -458,7 +458,7 @@ func (c *viamClient) dataExportBinaryIDsAction(ctx context.Context, args dataExp
 	if len(args.BinaryDataIDs) > 0 {
 		result := c.downloadBinary(ctx, args.Destination, args.Timeout, args.BinaryDataIDs...)
 		if result == nil { // nil result means success
-			printf(c.c.Root().Writer, "Downloaded %d files", len(args.BinaryDataIDs))
+			printf(c.c.Root().Writer, "Downloaded %s", pluralize(len(args.BinaryDataIDs), "file"))
 		}
 		return result
 	}
@@ -706,7 +706,7 @@ func (c *viamClient) binaryData(ctx context.Context, dst string, filter *datapb.
 		},
 		filter, parallelDownloads,
 		func(i int32) {
-			printf(c.c.Root().Writer, "Downloaded %d files", i)
+			printf(c.c.Root().Writer, "Downloaded %s", pluralize(int(i), "file"))
 		},
 	)
 }
