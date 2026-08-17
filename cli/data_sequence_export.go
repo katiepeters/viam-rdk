@@ -131,7 +131,7 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 
 		line := newProgressLine(c.c.Root().Writer,
 			fmt.Sprintf("  %s %s: %s", resource.GetResourceName(), resource.GetMethodName(), names[i]),
-			func(rows int) string { return " (" + pluralize(rows, "row") + ")" })
+			func(rows int) string { return fmt.Sprintf(" (%d %s)", rows, pluralize(rows, "row")) })
 		line.start()
 
 		// io.Discard for the writer: its only output is a dot per retry attempt, which the row
@@ -311,7 +311,7 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 		})
 	}
 
-	line := newProgressLine(c.c.Root().Writer, "  ", func(files int) string { return pluralize(files, "file") })
+	line := newProgressLine(c.c.Root().Writer, "  ", func(files int) string { return fmt.Sprintf("%d %s", files, pluralize(files, "file")) })
 	download := func(ctx context.Context, id string) error {
 		if err := c.downloadBinary(ctx, binaryDst, timeout, id); err != nil {
 			return err
@@ -339,7 +339,7 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 	// Replace the running total with the per-resource split.
 	line.erase()
 	for _, resource := range slices.Sorted(maps.Keys(countByResource)) {
-		printf(c.c.Root().Writer, "  %s: %s", resource, pluralize(countByResource[resource], "file"))
+		printf(c.c.Root().Writer, "  %s: %d %s", resource, countByResource[resource], pluralize(countByResource[resource], "file"))
 	}
 	return nil
 }

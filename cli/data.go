@@ -458,7 +458,7 @@ func (c *viamClient) dataExportBinaryIDsAction(ctx context.Context, args dataExp
 	if len(args.BinaryDataIDs) > 0 {
 		result := c.downloadBinary(ctx, args.Destination, args.Timeout, args.BinaryDataIDs...)
 		if result == nil { // nil result means success
-			printf(c.c.Root().Writer, "Downloaded %s", pluralize(len(args.BinaryDataIDs), "file"))
+			printf(c.c.Root().Writer, "Downloaded %d %s", len(args.BinaryDataIDs), pluralize(len(args.BinaryDataIDs), "file"))
 		}
 		return result
 	}
@@ -629,7 +629,7 @@ func (c *viamClient) dataQueryBinaryAction(ctx context.Context, args dataQueryBi
 		return errors.Wrap(err, "error writing query results")
 	}
 	if filePath != "" {
-		printf(c.c.Root().Writer, "Wrote %s to %s", pluralize(int(written), "result"), filePath)
+		printf(c.c.Root().Writer, "Wrote %d %s to %s", written, pluralize(int(written), "result"), filePath)
 	}
 	return nil
 }
@@ -693,7 +693,7 @@ func writeQueryResults(w io.Writer, dest string, rows [][]byte) error {
 	}
 
 	if filePath != "" {
-		printf(w, "Wrote %s to %s", pluralize(len(rows), "row"), filePath)
+		printf(w, "Wrote %d %s to %s", len(rows), pluralize(len(rows), "row"), filePath)
 	}
 	return nil
 }
@@ -706,7 +706,7 @@ func (c *viamClient) binaryData(ctx context.Context, dst string, filter *datapb.
 		},
 		filter, parallelDownloads,
 		func(i int32) {
-			printf(c.c.Root().Writer, "Downloaded %s", pluralize(int(i), "file"))
+			printf(c.c.Root().Writer, "Downloaded %d %s", i, pluralize(int(i), "file"))
 		},
 	)
 }
@@ -882,8 +882,10 @@ func (c *viamClient) downloadBinary(ctx context.Context, dst string, timeout uin
 
 	// Loop through responses and download each file
 	if len(data) != len(ids) {
-		return errors.Errorf("expected %s for %s, received %s",
-			pluralize(len(ids), "response"), pluralize(len(ids), "file"), pluralize(len(data), "response"))
+		return errors.Errorf("expected %d %s for %d %s, received %d %s",
+			len(ids), pluralize(len(ids), "response"),
+			len(ids), pluralize(len(ids), "file"),
+			len(data), pluralize(len(data), "response"))
 	}
 
 	for i, datum := range data {
@@ -1274,7 +1276,8 @@ func (c *viamClient) deleteBinaryData(filter *datapb.Filter) error {
 	if err != nil {
 		return errors.Wrapf(err, serverErrorMessage)
 	}
-	printf(c.c.Root().Writer, "Deleted %s", pluralize(int(resp.GetDeletedCount()), "file"))
+	deleted := int(resp.GetDeletedCount())
+	printf(c.c.Root().Writer, "Deleted %d %s", deleted, pluralize(deleted, "file"))
 	return nil
 }
 
@@ -1288,7 +1291,7 @@ func (c *viamClient) dataAddTagsToBinaryByFilter(ctx context.Context, filter *da
 		},
 		filter, parallelActions,
 		func(i int32) {
-			printf(c.c.Root().Writer, "Added tags to %s", pluralize(int(i), "file"))
+			printf(c.c.Root().Writer, "Added tags to %d %s", i, pluralize(int(i), "file"))
 		},
 	)
 }
@@ -1303,7 +1306,7 @@ func (c *viamClient) dataRemoveTagsFromBinaryByFilter(ctx context.Context, filte
 		},
 		filter, parallelActions,
 		func(i int32) {
-			printf(c.c.Root().Writer, "Removed tags from %s", pluralize(int(i), "file"))
+			printf(c.c.Root().Writer, "Removed tags from %d %s", i, pluralize(int(i), "file"))
 		},
 	)
 }
@@ -1337,7 +1340,8 @@ func (c *viamClient) deleteTabularData(orgID string, deleteOlderThanDays int) er
 	if err != nil {
 		return errors.Wrapf(err, serverErrorMessage)
 	}
-	printf(c.c.Root().Writer, "Deleted %s", pluralize(int(resp.GetDeletedCount()), "datapoint"))
+	deleted := int(resp.GetDeletedCount())
+	printf(c.c.Root().Writer, "Deleted %d %s", deleted, pluralize(deleted, "datapoint"))
 	return nil
 }
 
@@ -1417,7 +1421,7 @@ func (c *viamClient) dataAddToDatasetByFilter(ctx context.Context, filter *datap
 		},
 		filter, parallelActions,
 		func(i int32) {
-			printf(c.c.Root().Writer, "Added %s to dataset ID %s", pluralize(int(i), "file"), datasetID)
+			printf(c.c.Root().Writer, "Added %d %s to dataset ID %s", i, pluralize(int(i), "file"), datasetID)
 		})
 }
 
@@ -1488,7 +1492,7 @@ func (c *viamClient) dataRemoveFromDatasetByFilter(ctx context.Context, filter *
 		},
 		filter, parallelActions,
 		func(i int32) {
-			printf(c.c.Root().Writer, "Removed %s from dataset ID %s", pluralize(int(i), "file"), datasetID)
+			printf(c.c.Root().Writer, "Removed %d %s from dataset ID %s", i, pluralize(int(i), "file"), datasetID)
 		})
 }
 

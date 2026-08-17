@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -49,61 +49,103 @@ func sequenceBinaryMeta(id string) *datapb.BinaryMetadata {
 	return &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
 }
 
-// sequenceBinaryPath is where a sequence-exported binary datum must land: `data export binary`'s
-// data/ layout, rooted under binary/ rather than at the top level of the destination.
+// sequenceBinaryPath is where a sequence-exported binary datum lands: `data export binary`'s data/
+// layout, rooted under binary/ rather than at the top level of the destination.
 func sequenceBinaryPath(dst, id string) string {
 	return dataFilePath(filepath.Join(dst, sequenceBinaryExportDir), filenameForDownload(sequenceBinaryMeta(id)), ".jpg")
 }
 
-// sequenceExportClient wires an inject.DataServiceClient that serves the given sequence, streams
-// one tabular row per resource, and serves the given binary data records. It returns the client
-// and a pointer to the tabular requests it observed, in call order.
-func sequenceExportClient(
-	t *testing.T, sequence *datapb.Sequence, binary []*datapb.BinaryData,
-) (*viamClient, *[]*datapb.ExportTabularDataRequest) {
+// seqFake serves the RPCs a sequence export makes and records what it was asked for. Only the
+// fields a test cares about need setting; the rest behave benignly.
+type seqFake struct {
+	sequence *datapb.Sequence
+	binary   []*datapb.BinaryData
+	// pages, when set, serves GetSequenceBinaryData by page token instead of binary.
+	pages map[string]*datapb.GetSequenceBinaryDataResponse
+
+	// subtype maps a resource name to its subtype; "" means it has no tabular data. Defaults to
+	// deriving one from the name, so a test can tell which lookup fed which export.
+	subtype    func(resource string) string
+	subtypeErr error
+	exportErr  error
+	binaryErr  error
+
+	mu       sync.Mutex
+	exported []*datapb.ExportTabularDataRequest
+	lookedUp []string
+	tokens   []string
+}
+
+func (f *seqFake) client(t *testing.T) (*viamClient, *testWriter) {
 	t.Helper()
-
-	var mu sync.Mutex
-	var tabularRequests []*datapb.ExportTabularDataRequest
-
 	dsc := &inject.DataServiceClient{
 		GetSequenceFunc: func(_ context.Context, in *datapb.GetSequenceRequest, _ ...grpc.CallOption,
 		) (*datapb.GetSequenceResponse, error) {
-			if sequence == nil || in.GetId() != sequence.GetId() {
+			if f.sequence == nil || in.GetId() != f.sequence.GetId() {
 				return &datapb.GetSequenceResponse{}, nil
 			}
-			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
+			return &datapb.GetSequenceResponse{Sequence: f.sequence}, nil
 		},
-		// Every resource resolves to a subtype derived from its name, so tests can tell which
-		// lookup fed which export request.
 		//nolint:staticcheck
 		TabularDataByFilterFunc: func(_ context.Context, in *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
 		) (*datapb.TabularDataByFilterResponse, error) {
+			if f.subtypeErr != nil {
+				return nil, f.subtypeErr
+			}
 			name := in.GetDataRequest().GetFilter().GetComponentName()
+
+			f.mu.Lock()
+			f.lookedUp = append(f.lookedUp, name)
+			f.mu.Unlock()
+
+			subtype := "rdk:component:" + name
+			if f.subtype != nil {
+				subtype = f.subtype(name)
+			}
+			if subtype == "" {
+				return &datapb.TabularDataByFilterResponse{}, nil
+			}
 			return &datapb.TabularDataByFilterResponse{
-				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:" + name}},
+				Metadata: []*datapb.CaptureMetadata{{ComponentType: subtype}},
 			}, nil
 		},
 		ExportTabularDataFunc: func(_ context.Context, in *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
 		) (datapb.DataService_ExportTabularDataClient, error) {
-			mu.Lock()
-			tabularRequests = append(tabularRequests, in)
-			mu.Unlock()
+			f.mu.Lock()
+			f.exported = append(f.exported, in)
+			f.mu.Unlock()
+
+			if f.exportErr != nil {
+				// The stream carries the error, not the call that opens it.
+				return newMockExportStream(nil, f.exportErr), nil //nolint:nilerr
+			}
 			return newMockExportStream([]*datapb.ExportTabularDataResponse{
 				{LocationId: "loc-id", ResourceName: in.GetResourceName(), MethodName: in.GetMethodName()},
 			}, nil), nil
 		},
-		GetSequenceBinaryDataFunc: func(_ context.Context, _ *datapb.GetSequenceBinaryDataRequest, _ ...grpc.CallOption,
+		GetSequenceBinaryDataFunc: func(_ context.Context, in *datapb.GetSequenceBinaryDataRequest, _ ...grpc.CallOption,
 		) (*datapb.GetSequenceBinaryDataResponse, error) {
-			return &datapb.GetSequenceBinaryDataResponse{Data: binary}, nil
+			if f.binaryErr != nil {
+				return nil, f.binaryErr
+			}
+			f.mu.Lock()
+			f.tokens = append(f.tokens, in.GetPageToken())
+			f.mu.Unlock()
+
+			if f.pages == nil {
+				return &datapb.GetSequenceBinaryDataResponse{Data: f.binary}, nil
+			}
+			resp, ok := f.pages[in.GetPageToken()]
+			if !ok {
+				return nil, errors.New("unexpected page token " + in.GetPageToken())
+			}
+			return resp, nil
 		},
 		BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
 		) (*datapb.BinaryDataByIDsResponse, error) {
 			resp := &datapb.BinaryDataByIDsResponse{}
 			for _, id := range in.GetBinaryDataIds() {
-				datum := &datapb.BinaryData{
-					Metadata: &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"},
-				}
+				datum := &datapb.BinaryData{Metadata: sequenceBinaryMeta(id)}
 				if in.GetIncludeBinary() {
 					datum.Binary = []byte("bytes-" + id)
 				}
@@ -112,20 +154,26 @@ func sequenceExportClient(
 			return resp, nil
 		},
 	}
-
-	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-	_ = cCtx
-	return ac, &tabularRequests
+	_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+	return ac, out
 }
+
+func exportArgs(dst string, mutate ...func(*dataExportSequenceArgs)) dataExportSequenceArgs {
+	args := dataExportSequenceArgs{Destination: dst, SequenceID: testSequenceID, Parallel: 2}
+	for _, m := range mutate {
+		m(&args)
+	}
+	return args
+}
+
+func onlyTabular(a *dataExportSequenceArgs) { a.OnlyTabular = true }
+func onlyBinary(a *dataExportSequenceArgs)  { a.OnlyBinary = true }
 
 func TestSequenceTabularFileNames(t *testing.T) {
 	names := sequenceTabularFileNames([]*datapb.SequenceResourceFilter{
 		sequenceResource("camera-1", "ReadImage"),
-		// Path separators and other unsafe characters must not escape the tabular directory.
-		sequenceResource("../../etc/passwd", "ReadImage"),
-		// Sanitizes to the same base as the previous entry, so it must get a suffix.
-		sequenceResource("etc_passwd", "ReadImage"),
-		// Neither name populated: falls back to a fixed base.
+		sequenceResource("../../etc/passwd", "ReadImage"), // must not escape the tabular directory
+		sequenceResource("etc_passwd", "ReadImage"),       // sanitizes to the same base, so gets a suffix
 		sequenceResource("", ""),
 	})
 
@@ -140,389 +188,40 @@ func TestSequenceTabularFileNames(t *testing.T) {
 	}
 }
 
-func TestDataExportSequenceAction_RejectsConflictingOnlyFlags(t *testing.T) {
-	ac, _ := sequenceExportClient(t, testSequence(), nil)
-
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: t.TempDir(),
-		SequenceID:  testSequenceID,
-		OnlyTabular: true,
-		OnlyBinary:  true,
-	})
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "cannot both be provided")
-}
-
-func TestDataExportSequenceAction_SurfacesMissingSequence(t *testing.T) {
-	ac, _ := sequenceExportClient(t, nil, nil)
-
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: t.TempDir(),
-		SequenceID:  "nope",
-	})
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "not found")
-}
-
-func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
-	sequence := testSequence(
-		sequenceResource("sensor-1", "Readings"),
-		sequenceResource("power_sensor-1", "Voltage"),
-	)
-	ac, tabularRequests := sequenceExportClient(t, sequence, nil)
-
-	dst := t.TempDir()
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: dst,
-		SequenceID:  testSequenceID,
-		OnlyTabular: true,
-	})
-	test.That(t, err, test.ShouldBeNil)
-
-	// Each resource is exported over the sequence's part and interval.
-	test.That(t, len(*tabularRequests), test.ShouldEqual, 2)
-	for _, req := range *tabularRequests {
-		test.That(t, req.GetPartId(), test.ShouldEqual, testSequencePart)
-		test.That(t, req.GetInterval().GetStart().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceStart)
-		test.That(t, req.GetInterval().GetEnd().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceEnd)
-	}
-	test.That(t, (*tabularRequests)[0].GetResourceName(), test.ShouldEqual, "sensor-1")
-	test.That(t, (*tabularRequests)[0].GetMethodName(), test.ShouldEqual, "Readings")
-	test.That(t, (*tabularRequests)[1].GetResourceName(), test.ShouldEqual, "power_sensor-1")
-	test.That(t, (*tabularRequests)[1].GetMethodName(), test.ShouldEqual, "Voltage")
-
-	// Each resource carries its own resolved subtype rather than one value applied to all of them.
-	test.That(t, (*tabularRequests)[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:sensor-1")
-	test.That(t, (*tabularRequests)[1].GetResourceSubtype(), test.ShouldEqual, "rdk:component:power_sensor-1")
-
-	// Each resource lands in its own NDJSON file rather than overwriting a shared one.
-	cameraRows := readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "sensor-1-Readings.ndjson"))
-	test.That(t, len(cameraRows), test.ShouldEqual, 1)
-	test.That(t, cameraRows[0]["resourceName"], test.ShouldEqual, "sensor-1")
-
-	sensorRows := readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "power_sensor-1-Voltage.ndjson"))
-	test.That(t, len(sensorRows), test.ShouldEqual, 1)
-	test.That(t, sensorRows[0]["resourceName"], test.ShouldEqual, "power_sensor-1")
-
-	// --only-tabular means no binary data directory.
-	_, err = os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
-	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-}
-
-func TestDataExportSequenceAction_SkipsTabularWhenNoResources(t *testing.T) {
-	ac, tabularRequests := sequenceExportClient(t, testSequence(), nil)
-
-	dst := t.TempDir()
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: dst,
-		SequenceID:  testSequenceID,
-		OnlyTabular: true,
-	})
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(*tabularRequests), test.ShouldEqual, 0)
-
-	_, err = os.Stat(filepath.Join(dst, sequenceTabularDir))
-	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-}
-
-func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
-	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
-	binary := []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg"), mkBinaryData("bd-2", ".jpg")}
-	ac, tabularRequests := sequenceExportClient(t, sequence, binary)
-
-	dst := t.TempDir()
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: dst,
-		SequenceID:  testSequenceID,
-		Parallel:    2,
-		OnlyBinary:  true,
-	})
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(*tabularRequests), test.ShouldEqual, 0)
-
-	// Binary data is rooted at binary/, carrying `data export binary`'s data/ plus metadata/
-	// layout beneath it so nothing lands at the top level of the destination.
-	for _, id := range []string{"bd-1", "bd-2"} {
-		fileName := filenameForDownload(sequenceBinaryMeta(id))
-		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
-		_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir, metadataDir, fileName+".json"))
-		test.That(t, err, test.ShouldBeNil)
-	}
-	// Nothing may land directly under the destination.
-	_, err = os.Stat(filepath.Join(dst, dataDir))
-	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-	_, err = os.Stat(filepath.Join(dst, metadataDir))
-	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-}
-
-func TestDataExportSequenceAction_ExportsTabularAndBinaryByDefault(t *testing.T) {
-	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
-	ac, tabularRequests := sequenceExportClient(t, sequence, []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")})
-
-	dst := t.TempDir()
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: dst,
-		SequenceID:  testSequenceID,
-		Parallel:    2,
-	})
-	test.That(t, err, test.ShouldBeNil)
-
-	test.That(t, len(*tabularRequests), test.ShouldEqual, 1)
-	test.That(t, len(readNDJSON(t, filepath.Join(dst, sequenceTabularDir, "sensor-1-Readings.ndjson"))), test.ShouldEqual, 1)
-
-	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
-}
-
-// TestDataExportSequenceAction_SkipsResourceWithNoData covers a resource that captured nothing in
-// the sequence's interval: the subtype lookup comes back empty, and since ExportTabularData needs
-// one, the resource is skipped rather than exported with a blank subtype.
-func TestDataExportSequenceAction_SkipsResourceWithNoData(t *testing.T) {
-	sequence := testSequence(
-		sequenceResource("sensor-1", "Readings"),
-		sequenceResource("ghost-1", "Readings"),
-	)
-
-	var mu sync.Mutex
-	var tabularRequests []*datapb.ExportTabularDataRequest
-	dsc := &inject.DataServiceClient{
-		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceResponse, error) {
-			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
-		},
-		//nolint:staticcheck
-		TabularDataByFilterFunc: func(_ context.Context, in *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
-		) (*datapb.TabularDataByFilterResponse, error) {
-			if in.GetDataRequest().GetFilter().GetComponentName() == "ghost-1" {
-				return &datapb.TabularDataByFilterResponse{}, nil
-			}
-			return &datapb.TabularDataByFilterResponse{
-				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:camera"}},
-			}, nil
-		},
-		ExportTabularDataFunc: func(_ context.Context, in *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
-		) (datapb.DataService_ExportTabularDataClient, error) {
-			mu.Lock()
-			tabularRequests = append(tabularRequests, in)
-			mu.Unlock()
-			return newMockExportStream([]*datapb.ExportTabularDataResponse{{LocationId: "loc-id"}}, nil), nil
-		},
-	}
-	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-	_ = cCtx
-
-	dst := t.TempDir()
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: dst,
-		SequenceID:  testSequenceID,
-		OnlyTabular: true,
-	})
-	test.That(t, err, test.ShouldBeNil)
-
-	// Only the resource with data was exported, and it carries the resolved subtype.
-	test.That(t, len(tabularRequests), test.ShouldEqual, 1)
-	test.That(t, tabularRequests[0].GetResourceName(), test.ShouldEqual, "sensor-1")
-	test.That(t, tabularRequests[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:camera")
-
-	// No file is written for the skipped resource.
-	_, err = os.Stat(filepath.Join(dst, sequenceTabularDir, "ghost-1-Readings.ndjson"))
-	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-}
-
-func TestDataExportSequenceAction_SurfacesSubtypeLookupErrors(t *testing.T) {
-	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
-	dsc := &inject.DataServiceClient{
-		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceResponse, error) {
-			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
-		},
-		//nolint:staticcheck
-		TabularDataByFilterFunc: func(_ context.Context, _ *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
-		) (*datapb.TabularDataByFilterResponse, error) {
-			return nil, errors.New("lookup boom")
-		},
-	}
-	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-	_ = cCtx
-
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: t.TempDir(),
-		SequenceID:  testSequenceID,
-		OnlyTabular: true,
-	})
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
-	test.That(t, err.Error(), test.ShouldContainSubstring, "lookup boom")
-}
-
-// TestDataExportSequenceAction_BinaryLogging pins what gets logged around binary data. The
-// "Downloading binary data ... to <dst>/binary" line used to print unconditionally, before
-// anything was known about whether the sequence had any -- naming a directory that is only created
-// once there is something to write into it. At zero files the driver's own progress print is
-// skipped too (0 % logEveryN == 0), so the run ended on a claim that never came true.
-func TestDataExportSequenceAction_BinaryLogging(t *testing.T) {
-	newClient := func(t *testing.T, binary []*datapb.BinaryData) (*viamClient, *testWriter) {
-		t.Helper()
-		dsc := &inject.DataServiceClient{
-			GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
-			) (*datapb.GetSequenceResponse, error) {
-				return &datapb.GetSequenceResponse{Sequence: testSequence()}, nil
-			},
-			GetSequenceBinaryDataFunc: func(_ context.Context, _ *datapb.GetSequenceBinaryDataRequest, _ ...grpc.CallOption,
-			) (*datapb.GetSequenceBinaryDataResponse, error) {
-				return &datapb.GetSequenceBinaryDataResponse{Data: binary}, nil
-			},
-			BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
-			) (*datapb.BinaryDataByIDsResponse, error) {
-				resp := &datapb.BinaryDataByIDsResponse{}
-				for _, id := range in.GetBinaryDataIds() {
-					datum := &datapb.BinaryData{Metadata: sequenceBinaryMeta(id)}
-					if in.GetIncludeBinary() {
-						datum.Binary = []byte("bytes-" + id)
-					}
-					resp.Data = append(resp.Data, datum)
-				}
-				return resp, nil
-			},
-		}
-		_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-		return ac, out
-	}
-
-	t.Run("says so when the sequence has no binary data", func(t *testing.T) {
-		ac, out := newClient(t, nil)
-		dst := t.TempDir()
-
-		err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-			Destination: dst, SequenceID: testSequenceID, Parallel: 2, OnlyBinary: true,
-		})
-		test.That(t, err, test.ShouldBeNil)
-
-		logged := strings.Join(out.messages, "")
-		test.That(t, logged, test.ShouldContainSubstring, "Binary data (binary/):\n  none")
-
-		// The claim has to match the disk: nothing was written, so binary/ must not exist.
-		_, statErr := os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
-		test.That(t, os.IsNotExist(statErr), test.ShouldBeTrue)
-	})
-
-	t.Run("announces the download when there is binary data", func(t *testing.T) {
-		blob := mkBinaryData("bd-1", ".jpg")
-		blob.Metadata.CaptureMetadata = &datapb.CaptureMetadata{ComponentName: "camera-1", MethodName: "GetImages"}
-		ac, out := newClient(t, []*datapb.BinaryData{blob})
-		dst := t.TempDir()
-
-		err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-			Destination: dst, SequenceID: testSequenceID, Parallel: 2, OnlyBinary: true,
-		})
-		test.That(t, err, test.ShouldBeNil)
-
-		logged := strings.Join(out.messages, "")
-		// Counted against the resource it came from, matching how the tabular section reads.
-		test.That(t, logged, test.ShouldContainSubstring, "Binary data (binary/):\n  camera-1 GetImages: 1 file")
-		test.That(t, logged, test.ShouldNotContainSubstring, "none")
-		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
-	})
-}
-
-// TestDataExportSequenceAction_SkipsBinaryCaptureMethods covers the classifier: a camera captures
-// binary, so its resource has no tabular data by definition. It should cost no subtype lookup and
-// produce no output here -- the binary half of the export is what covers those resources.
-func TestDataExportSequenceAction_SkipsBinaryCaptureMethods(t *testing.T) {
-	sequence := testSequence(
-		sequenceResource("camera-1", "GetImages"),
-		sequenceResource("camera-2", "ReadImage"),
-		sequenceResource("sensor-1", "Readings"),
-	)
-
-	var mu sync.Mutex
-	var lookedUp, exported []string
-	dsc := &inject.DataServiceClient{
-		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceResponse, error) {
-			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
-		},
-		//nolint:staticcheck
-		TabularDataByFilterFunc: func(_ context.Context, in *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
-		) (*datapb.TabularDataByFilterResponse, error) {
-			mu.Lock()
-			lookedUp = append(lookedUp, in.GetDataRequest().GetFilter().GetComponentName())
-			mu.Unlock()
-			return &datapb.TabularDataByFilterResponse{
-				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:sensor"}},
-			}, nil
-		},
-		ExportTabularDataFunc: func(_ context.Context, in *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
-		) (datapb.DataService_ExportTabularDataClient, error) {
-			mu.Lock()
-			exported = append(exported, in.GetResourceName())
-			mu.Unlock()
-			return newMockExportStream([]*datapb.ExportTabularDataResponse{{LocationId: "loc"}}, nil), nil
-		},
-	}
-	_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: t.TempDir(), SequenceID: testSequenceID, OnlyTabular: true,
-	})
-	test.That(t, err, test.ShouldBeNil)
-
-	// Binary capture methods cost no lookup and produce no export.
-	test.That(t, lookedUp, test.ShouldResemble, []string{"sensor-1"})
-	test.That(t, exported, test.ShouldResemble, []string{"sensor-1"})
-
-	// Skipped silently: the binary half covers these resources, so naming them here is noise, and
-	// they must not be reported as if the resource had no data.
-	logged := strings.Join(out.messages, "")
-	test.That(t, logged, test.ShouldNotContainSubstring, "camera-1")
-	test.That(t, logged, test.ShouldNotContainSubstring, "camera-2")
-	test.That(t, logged, test.ShouldNotContainSubstring, "no tabular data")
-}
-
-func TestPluralize(t *testing.T) {
-	// Only exactly one is singular; zero takes the plural.
-	test.That(t, pluralize(0, "file"), test.ShouldEqual, "0 files")
-	test.That(t, pluralize(1, "file"), test.ShouldEqual, "1 file")
-	test.That(t, pluralize(2, "file"), test.ShouldEqual, "2 files")
-	test.That(t, pluralize(1, "row"), test.ShouldEqual, "1 row")
-	test.That(t, pluralize(1234, "row"), test.ShouldEqual, "1234 rows")
-}
-
 func TestProgressLine(t *testing.T) {
-	rowTail := func(n int) string { return " (" + pluralize(n, "row") + ")" }
+	rowTail := func(n int) string { return fmt.Sprintf(" (%d %s)", n, pluralize(n, "row")) }
+	const prefix = "  cam Readings: cam.ndjson"
 
 	t.Run("redraws in place on a terminal", func(t *testing.T) {
 		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: rowTail, terminal: true}
+		line := &progressLine{w: &buf, prefix: prefix, tail: rowTail, terminal: true}
 		line.start()
 		line.update(100)
 		line.finish(250)
 
 		test.That(t, buf.String(), test.ShouldEqual,
-			"  cam Readings: cam.ndjson"+
-				"\r  cam Readings: cam.ndjson (100 rows)"+
-				"\r  cam Readings: cam.ndjson (250 rows)\n")
+			prefix+"\r"+prefix+" (100 rows)"+"\r"+prefix+" (250 rows)\n")
 	})
 
 	t.Run("off a terminal writes the line once", func(t *testing.T) {
 		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: rowTail}
+		line := &progressLine{w: &buf, prefix: prefix, tail: rowTail}
 		line.start()
 		line.update(100) // no cursor to move, so intermediate counts are dropped
 		line.finish(250)
 
-		test.That(t, buf.String(), test.ShouldEqual, "  cam Readings: cam.ndjson (250 rows)\n")
+		test.That(t, buf.String(), test.ShouldEqual, prefix+" (250 rows)\n")
 	})
 
 	t.Run("writes a whole line when start was skipped", func(t *testing.T) {
 		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  ", tail: func(n int) string { return pluralize(n, "file") }}
+		line := &progressLine{w: &buf, prefix: "  ", tail: func(n int) string { return fmt.Sprintf("%d %s", n, pluralize(n, "file")) }}
 		line.finish(18)
 
 		test.That(t, buf.String(), test.ShouldEqual, "  18 files\n")
 	})
 
-	// The prefix is caller-supplied -- a resource can be named "rate%" -- so it must never be
-	// treated as a format string.
+	// A resource can be named "rate%", so the prefix must never reach a format function.
 	t.Run("does not interpret verbs in the prefix", func(t *testing.T) {
 		var buf bytes.Buffer
 		line := &progressLine{w: &buf, prefix: "  rate%s %d: f.ndjson", tail: rowTail}
@@ -532,133 +231,9 @@ func TestProgressLine(t *testing.T) {
 	})
 }
 
-func TestDataExportSequenceAction_SurfacesTabularErrors(t *testing.T) {
-	sequence := testSequence(sequenceResource("sensor-1", "Readings"))
-	dsc := &inject.DataServiceClient{
-		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceResponse, error) {
-			return &datapb.GetSequenceResponse{Sequence: sequence}, nil
-		},
-		//nolint:staticcheck
-		TabularDataByFilterFunc: func(_ context.Context, _ *datapb.TabularDataByFilterRequest, _ ...grpc.CallOption,
-		) (*datapb.TabularDataByFilterResponse, error) {
-			return &datapb.TabularDataByFilterResponse{
-				Metadata: []*datapb.CaptureMetadata{{ComponentType: "rdk:component:camera"}},
-			}, nil
-		},
-		ExportTabularDataFunc: func(_ context.Context, _ *datapb.ExportTabularDataRequest, _ ...grpc.CallOption,
-		) (datapb.DataService_ExportTabularDataClient, error) {
-			return newMockExportStream(nil, errors.New("boom")), nil
-		},
-	}
-	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-	_ = cCtx
-
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: t.TempDir(),
-		SequenceID:  testSequenceID,
-		OnlyTabular: true,
-	})
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
-	test.That(t, err.Error(), test.ShouldContainSubstring, "boom")
-}
-
-func TestDataExportSequenceAction_SurfacesBinaryErrors(t *testing.T) {
-	dsc := &inject.DataServiceClient{
-		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceResponse, error) {
-			return &datapb.GetSequenceResponse{Sequence: testSequence()}, nil
-		},
-		GetSequenceBinaryDataFunc: func(_ context.Context, _ *datapb.GetSequenceBinaryDataRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceBinaryDataResponse, error) {
-			return nil, errors.New("server boom")
-		},
-	}
-	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-	_ = cCtx
-
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: t.TempDir(),
-		SequenceID:  testSequenceID,
-		Parallel:    2,
-		OnlyBinary:  true,
-	})
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "server boom")
-}
-
-// TestDataExportSequenceAction_PagesBinaryData guards the paging loop in
-// forEachSequenceBinaryData: every page must be consumed, and each request after the first must
-// carry the token the previous response returned.
-func TestDataExportSequenceAction_PagesBinaryData(t *testing.T) {
-	pages := map[string]*datapb.GetSequenceBinaryDataResponse{
-		"": {Data: []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")}, NextPageToken: "page-2"},
-		"page-2": {
-			Data:          []*datapb.BinaryData{mkBinaryData("bd-2", ".jpg"), mkBinaryData("bd-3", ".jpg")},
-			NextPageToken: "page-3",
-		},
-		// Terminal page: empty next token ends the loop.
-		"page-3": {Data: []*datapb.BinaryData{mkBinaryData("bd-4", ".jpg")}},
-	}
-
-	var mu sync.Mutex
-	var requestedTokens []string
-	dsc := &inject.DataServiceClient{
-		GetSequenceFunc: func(_ context.Context, _ *datapb.GetSequenceRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceResponse, error) {
-			return &datapb.GetSequenceResponse{Sequence: testSequence()}, nil
-		},
-		GetSequenceBinaryDataFunc: func(_ context.Context, in *datapb.GetSequenceBinaryDataRequest, _ ...grpc.CallOption,
-		) (*datapb.GetSequenceBinaryDataResponse, error) {
-			mu.Lock()
-			requestedTokens = append(requestedTokens, in.GetPageToken())
-			mu.Unlock()
-			resp, ok := pages[in.GetPageToken()]
-			if !ok {
-				return nil, errors.New("unexpected page token " + in.GetPageToken())
-			}
-			return resp, nil
-		},
-		BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
-		) (*datapb.BinaryDataByIDsResponse, error) {
-			resp := &datapb.BinaryDataByIDsResponse{}
-			for _, id := range in.GetBinaryDataIds() {
-				datum := &datapb.BinaryData{
-					Metadata: &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"},
-				}
-				if in.GetIncludeBinary() {
-					datum.Binary = []byte("bytes-" + id)
-				}
-				resp.Data = append(resp.Data, datum)
-			}
-			return resp, nil
-		},
-	}
-	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-	_ = cCtx
-
-	dst := t.TempDir()
-	err := ac.dataExportSequenceAction(context.Background(), dataExportSequenceArgs{
-		Destination: dst,
-		SequenceID:  testSequenceID,
-		Parallel:    2,
-		OnlyBinary:  true,
-	})
-	test.That(t, err, test.ShouldBeNil)
-
-	test.That(t, requestedTokens, test.ShouldResemble, []string{"", "page-2", "page-3"})
-	for _, id := range []string{"bd-1", "bd-2", "bd-3", "bd-4"} {
-		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
-	}
-}
-
-// TestDataExportSequenceCommandFlags guards that every flag registered on `data export sequence`
-// maps onto a field of dataExportSequenceArgs, since that binding is reflective.
+// TestDataExportSequenceCommandFlags guards the reflective binding of flags onto args fields.
 func TestDataExportSequenceCommandFlags(t *testing.T) {
-	out := &testWriter{}
-	errOut := &testWriter{}
-	cCtx := buildTestCmd(out, errOut, map[string]any{
+	cCtx := buildTestCmd(&testWriter{}, &testWriter{}, map[string]any{
 		generalFlagDestination:    utils.ResolveFile(""),
 		dataFlagSequenceID:        testSequenceID,
 		dataFlagParallelDownloads: uint(4),
@@ -676,17 +251,237 @@ func TestDataExportSequenceCommandFlags(t *testing.T) {
 	test.That(t, args.OnlyBinary, test.ShouldBeTrue)
 }
 
-func readNDJSON(t *testing.T, path string) []map[string]interface{} {
-	t.Helper()
-	contents := mustReadFile(t, path)
+func TestDataExportSequenceAction_RejectsConflictingOnlyFlags(t *testing.T) {
+	ac, _ := (&seqFake{sequence: testSequence()}).client(t)
 
-	var rows []map[string]interface{}
-	decoder := json.NewDecoder(strings.NewReader(string(contents)))
-	for decoder.More() {
-		var row map[string]interface{}
-		test.That(t, decoder.Decode(&row), test.ShouldBeNil)
-		rows = append(rows, row)
+	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyTabular, onlyBinary))
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "cannot both be provided")
+}
+
+func TestDataExportSequenceAction_SurfacesMissingSequence(t *testing.T) {
+	ac, _ := (&seqFake{}).client(t)
+
+	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir()))
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "not found")
+}
+
+func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
+	fake := &seqFake{sequence: testSequence(
+		sequenceResource("sensor-1", "Readings"),
+		sequenceResource("power_sensor-1", "Voltage"),
+	)}
+	ac, _ := fake.client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyTabular)), test.ShouldBeNil)
+
+	test.That(t, len(fake.exported), test.ShouldEqual, 2)
+	for _, req := range fake.exported {
+		test.That(t, req.GetPartId(), test.ShouldEqual, testSequencePart)
+		test.That(t, req.GetInterval().GetStart().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceStart)
+		test.That(t, req.GetInterval().GetEnd().AsTime().Format(time.RFC3339), test.ShouldEqual, testSequenceEnd)
 	}
-	sort.Slice(rows, func(i, j int) bool { return len(rows[i]) < len(rows[j]) })
-	return rows
+	test.That(t, fake.exported[0].GetResourceName(), test.ShouldEqual, "sensor-1")
+	test.That(t, fake.exported[1].GetResourceName(), test.ShouldEqual, "power_sensor-1")
+
+	// Each resource carries its own resolved subtype, not one value applied to all of them.
+	test.That(t, fake.exported[0].GetResourceSubtype(), test.ShouldEqual, "rdk:component:sensor-1")
+	test.That(t, fake.exported[1].GetResourceSubtype(), test.ShouldEqual, "rdk:component:power_sensor-1")
+
+	// Each resource lands in its own file rather than overwriting a shared one.
+	test.That(t, readNDJSON(t, dst, "sensor-1-Readings.ndjson")["resourceName"], test.ShouldEqual, "sensor-1")
+	test.That(t, readNDJSON(t, dst, "power_sensor-1-Voltage.ndjson")["resourceName"], test.ShouldEqual, "power_sensor-1")
+
+	_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
+	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+}
+
+func TestDataExportSequenceAction_SkipsTabularWhenNoResources(t *testing.T) {
+	fake := &seqFake{sequence: testSequence()}
+	ac, _ := fake.client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyTabular)), test.ShouldBeNil)
+	test.That(t, len(fake.exported), test.ShouldEqual, 0)
+
+	_, err := os.Stat(filepath.Join(dst, sequenceTabularDir))
+	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+}
+
+// A camera captures binary, so its resource has no tabular data by definition: no subtype lookup
+// should be spent on it, and it should produce no output here.
+func TestDataExportSequenceAction_SkipsBinaryCaptureMethods(t *testing.T) {
+	fake := &seqFake{sequence: testSequence(
+		sequenceResource("camera-1", "GetImages"),
+		sequenceResource("camera-2", "ReadImage"),
+		sequenceResource("sensor-1", "Readings"),
+	)}
+	ac, out := fake.client(t)
+
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyTabular)), test.ShouldBeNil)
+
+	test.That(t, fake.lookedUp, test.ShouldResemble, []string{"sensor-1"})
+	test.That(t, len(fake.exported), test.ShouldEqual, 1)
+
+	logged := strings.Join(out.messages, "")
+	test.That(t, logged, test.ShouldNotContainSubstring, "camera-")
+	test.That(t, logged, test.ShouldNotContainSubstring, "no tabular data")
+}
+
+// A resource whose subtype lookup comes back empty is skipped rather than exported with a blank
+// subtype, which ExportTabularData requires.
+func TestDataExportSequenceAction_SkipsResourceWithNoTabularData(t *testing.T) {
+	fake := &seqFake{
+		sequence: testSequence(
+			sequenceResource("sensor-1", "Readings"),
+			sequenceResource("ghost-1", "Readings"),
+		),
+		subtype: func(resource string) string {
+			if resource == "ghost-1" {
+				return ""
+			}
+			return "rdk:component:sensor"
+		},
+	}
+	ac, _ := fake.client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyTabular)), test.ShouldBeNil)
+
+	test.That(t, len(fake.exported), test.ShouldEqual, 1)
+	test.That(t, fake.exported[0].GetResourceName(), test.ShouldEqual, "sensor-1")
+
+	_, err := os.Stat(filepath.Join(dst, sequenceTabularDir, "ghost-1-Readings.ndjson"))
+	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+}
+
+func TestDataExportSequenceAction_SurfacesSubtypeLookupErrors(t *testing.T) {
+	fake := &seqFake{
+		sequence:   testSequence(sequenceResource("sensor-1", "Readings")),
+		subtypeErr: errors.New("lookup boom"),
+	}
+	ac, _ := fake.client(t)
+
+	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyTabular))
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "lookup boom")
+}
+
+func TestDataExportSequenceAction_SurfacesTabularErrors(t *testing.T) {
+	fake := &seqFake{
+		sequence:  testSequence(sequenceResource("sensor-1", "Readings")),
+		exportErr: errors.New("boom"),
+	}
+	ac, _ := fake.client(t)
+
+	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyTabular))
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "boom")
+}
+
+func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
+	captured := func(id string) *datapb.BinaryData {
+		bd := mkBinaryData(id, ".jpg")
+		bd.Metadata.CaptureMetadata = &datapb.CaptureMetadata{ComponentName: "camera-1", MethodName: "GetImages"}
+		return bd
+	}
+	fake := &seqFake{
+		sequence: testSequence(sequenceResource("sensor-1", "Readings")),
+		binary:   []*datapb.BinaryData{captured("bd-1"), captured("bd-2")},
+	}
+	ac, out := fake.client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyBinary)), test.ShouldBeNil)
+	test.That(t, len(fake.exported), test.ShouldEqual, 0)
+
+	// Rooted at binary/, carrying `data export binary`'s data/ plus metadata/ layout beneath it.
+	for _, id := range []string{"bd-1", "bd-2"} {
+		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
+		_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir, metadataDir, filenameForDownload(sequenceBinaryMeta(id))+".json"))
+		test.That(t, err, test.ShouldBeNil)
+	}
+	for _, dir := range []string{dataDir, metadataDir} {
+		_, err := os.Stat(filepath.Join(dst, dir))
+		test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+	}
+
+	// Counted against the resource they came from, matching how the tabular section reads.
+	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring,
+		"Binary data (binary/):\n  camera-1 GetImages: 2 files")
+}
+
+func TestDataExportSequenceAction_ReportsNoBinaryData(t *testing.T) {
+	ac, out := (&seqFake{sequence: testSequence()}).client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyBinary)), test.ShouldBeNil)
+	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring, "Binary data (binary/):\n  none")
+
+	// The claim has to match the disk: nothing written, so binary/ must not exist.
+	_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
+	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+}
+
+func TestDataExportSequenceAction_SurfacesBinaryErrors(t *testing.T) {
+	fake := &seqFake{sequence: testSequence(), binaryErr: errors.New("server boom")}
+	ac, _ := fake.client(t)
+
+	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyBinary))
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "server boom")
+}
+
+// Every page must be consumed, and each request after the first must carry the token the previous
+// response returned.
+func TestDataExportSequenceAction_PagesBinaryData(t *testing.T) {
+	fake := &seqFake{
+		sequence: testSequence(),
+		pages: map[string]*datapb.GetSequenceBinaryDataResponse{
+			"": {Data: []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")}, NextPageToken: "page-2"},
+			"page-2": {
+				Data:          []*datapb.BinaryData{mkBinaryData("bd-2", ".jpg"), mkBinaryData("bd-3", ".jpg")},
+				NextPageToken: "page-3",
+			},
+			"page-3": {Data: []*datapb.BinaryData{mkBinaryData("bd-4", ".jpg")}},
+		},
+	}
+	ac, _ := fake.client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyBinary)), test.ShouldBeNil)
+
+	test.That(t, fake.tokens, test.ShouldResemble, []string{"", "page-2", "page-3"})
+	for _, id := range []string{"bd-1", "bd-2", "bd-3", "bd-4"} {
+		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
+	}
+}
+
+func TestDataExportSequenceAction_ExportsBothByDefault(t *testing.T) {
+	fake := &seqFake{
+		sequence: testSequence(sequenceResource("sensor-1", "Readings")),
+		binary:   []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")},
+	}
+	ac, _ := fake.client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst)), test.ShouldBeNil)
+
+	test.That(t, len(fake.exported), test.ShouldEqual, 1)
+	test.That(t, readNDJSON(t, dst, "sensor-1-Readings.ndjson")["resourceName"], test.ShouldEqual, "sensor-1")
+	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
+}
+
+// readNDJSON returns the single row the fake's export stream writes for a resource.
+func readNDJSON(t *testing.T, dst, name string) map[string]any {
+	t.Helper()
+	contents := mustReadFile(t, filepath.Join(dst, sequenceTabularDir, name))
+
+	var row map[string]any
+	test.That(t, json.NewDecoder(strings.NewReader(string(contents))).Decode(&row), test.ShouldBeNil)
+	return row
 }
