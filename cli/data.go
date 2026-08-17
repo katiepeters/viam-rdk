@@ -880,12 +880,14 @@ func (c *viamClient) downloadBinary(ctx context.Context, dst string, timeout uin
 
 	data := resp.GetData()
 
+	numExpectedResponses := len(ids)
+	numReceivedResponses := len(data)
 	// Loop through responses and download each file
-	if len(data) != len(ids) {
+	if numExpectedResponses != numReceivedResponses {
 		return errors.Errorf("expected %d %s for %d %s, received %d %s",
-			len(ids), pluralize(len(ids), "response"),
-			len(ids), pluralize(len(ids), "file"),
-			len(data), pluralize(len(data), "response"))
+			numExpectedResponses, pluralize(numExpectedResponses, "response"),
+			numExpectedResponses, pluralize(numExpectedResponses, "file"),
+			numReceivedResponses, pluralize(numReceivedResponses, "response"))
 	}
 
 	for i, datum := range data {
@@ -1110,22 +1112,16 @@ func (c *viamClient) tabularData(dest string, request *datapb.ExportTabularDataR
 	return err
 }
 
-// tabularDataToFile streams the tabular export for request into dataFilePath, overwriting whatever
-// is already there. The parent directory must already exist. Callers that export several requests
-// (e.g. one per resource of a sequence) use this directly so each gets its own file.
+// tabularDataToFile streams a tabular export request into the provided dataFilePath.
+// The parent directory must already exist. Returns the number of rows written.
 //
-// One '.' is written to progress per attempt, followed by a newline, so a caller can print an
-// unterminated line first and have the progress attach to it. Pass io.Discard to render nothing.
-//
-// onRows, when non-nil, is called with the running row count every tabularProgressEveryNRows rows,
-// letting the caller render live progress however it likes. Returns the number of rows written by
-// the attempt that succeeded.
+// progressOut gets one '.' per attempt and a closing newline; pass io.Discard for no output.
+// onRows, if set, is called with the running row count every tabularProgressEveryNRows rows.
 func (c *viamClient) tabularDataToFile(
-	dataFilePath string, request *datapb.ExportTabularDataRequest, progress io.Writer, onRows func(rows int),
+	dataFilePath string, request *datapb.ExportTabularDataRequest, progressOut io.Writer, onRows func(rows int),
 ) (int, error) {
 	var rows int
 	for count := 0; count < maxRetryCount; count++ {
-		// Each attempt recreates the file from scratch, so the row count restarts with it.
 		rows = 0
 		err := func() error {
 			dataFile, err := os.Create(dataFilePath) //nolint:gosec
@@ -1160,7 +1156,7 @@ func (c *viamClient) tabularDataToFile(
 				}
 			}()
 
-			fmt.Fprintf(progress, ".") //nolint:errcheck // Adds '.' to 'Downloading..' output.
+			fmt.Fprintf(progressOut, ".") //nolint:errcheck // appends to whatever line the caller opened
 
 			go func() {
 				defer close(dataRowChan)
@@ -1235,7 +1231,7 @@ func (c *viamClient) tabularDataToFile(
 			continue
 		}
 
-		printf(progress, "") // newline
+		printf(progressOut, "") // end the progress line
 		return rows, err
 	}
 

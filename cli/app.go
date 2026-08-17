@@ -1470,13 +1470,13 @@ Note: There is no progress meter while copying is in progress.
 								},
 								&cli.UintFlag{
 									Name:      dataFlagParallelDownloads,
-									Usage:     "number of download requests to make in parallel",
+									Usage:     "number of binary download requests to make in parallel",
 									Value:     defaultParallelBinaryDownloads,
 									Validator: mustBePositiveUint(dataFlagParallelDownloads),
 								},
 								&cli.UintFlag{
 									Name:  dataFlagTimeout,
-									Usage: "number of seconds to wait for large file downloads",
+									Usage: "number of seconds to wait for large binary file downloads",
 									Value: 30,
 								},
 								&cli.BoolFlag{

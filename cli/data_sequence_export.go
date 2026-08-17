@@ -25,11 +25,6 @@ const (
 	sequenceBinaryExportDir = "binary"
 )
 
-// unsafeFileNameChars matches everything we refuse to put in a generated file name. Resource and
-// method names come from user config, so they can contain path separators and other characters
-// that would escape the destination directory.
-var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
 type dataExportSequenceArgs struct {
 	Destination string
 	SequenceID  string
@@ -67,28 +62,32 @@ func (c *viamClient) dataExportSequenceAction(ctx context.Context, args dataExpo
 	if err := makeDestinationDirs(args.Destination); err != nil {
 		return errors.Wrap(err, "could not create destination directory")
 	}
+
 	printf(c.c.Root().Writer, "Exporting sequence %s to %s", sequence.GetId(), args.Destination)
 
+	tabular, binary := partitionResourcesByCaptureType(sequence.GetResources())
 	if !args.OnlyBinary {
-		if err := c.exportSequenceTabular(ctx, sequence, args.Destination); err != nil {
+		if err := c.exportSequenceTabular(ctx, sequence, tabular, args.Destination); err != nil {
 			return err
 		}
 	}
 	if !args.OnlyTabular {
-		if err := c.exportSequenceBinary(ctx, sequence.GetId(), args.Destination, args.Parallel, args.Timeout); err != nil {
+		if err := c.exportSequenceBinary(ctx, sequence.GetId(), binary, args.Destination, args.Parallel, args.Timeout); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
 // exportSequenceTabular runs one tabular export per resource the sequence references, scoped to
 // the sequence's part and capture interval, writing each to its own NDJSON file under dst/tabular/.
-func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb.Sequence, dst string) error {
+func (c *viamClient) exportSequenceTabular(
+	ctx context.Context, sequence *datapb.Sequence, resources []*datapb.SequenceResourceFilter, dst string,
+) error {
 	printf(c.c.Root().Writer, "")
 	printf(c.c.Root().Writer, "Tabular data (%s/):", sequenceTabularDir)
 
-	resources := sequence.GetResources()
 	if len(resources) == 0 {
 		printf(c.c.Root().Writer, "  none")
 		return nil
@@ -102,20 +101,13 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 	interval := &datapb.CaptureInterval{Start: sequence.GetStartTime(), End: sequence.GetEndTime()}
 	names := sequenceTabularFileNames(resources)
 	for i, resource := range resources {
-		// A binary capture method (GetImages, ReadImage, NextPointCloud, ...) has no tabular data
-		// by definition. Skip silently -- the binary half of the export covers these resources, so
-		// naming them here would only be noise.
-		if data.MethodToCaptureType(resource.GetMethodName()) == data.CaptureTypeBinary {
-			continue
-		}
-
 		subtype, err := c.resolveResourceSubtype(ctx, sequence.GetPartId(), resource, interval)
 		if err != nil {
 			return err
 		}
 		if subtype == "" {
-			// MethodToCaptureType defaults unknown methods to tabular, so a module's binary method
-			// that isn't on its list still reaches here; no rows means nothing to export either way.
+			// A module's binary method is not on MethodToCaptureType's list, so it is partitioned as
+			// tabular and lands here instead; either way, no rows means nothing to export.
 			printf(c.c.Root().Writer, "  %s %s: no tabular data in the sequence's interval, skipping",
 				resource.GetResourceName(), resource.GetMethodName())
 			continue
@@ -145,6 +137,22 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 		line.finish(rows)
 	}
 	return nil
+}
+
+// partitionResourcesByCaptureType splits a sequence's resources by what their capture method
+// produces. MethodToCaptureType defaults anything it does not recognise to tabular, so a module's
+// binary method lands in tabular and is skipped later when its subtype lookup finds no rows.
+func partitionResourcesByCaptureType(
+	resources []*datapb.SequenceResourceFilter,
+) (tabular, binary []*datapb.SequenceResourceFilter) {
+	for _, resource := range resources {
+		if data.MethodToCaptureType(resource.GetMethodName()) == data.CaptureTypeBinary {
+			binary = append(binary, resource)
+			continue
+		}
+		tabular = append(tabular, resource)
+	}
+	return tabular, binary
 }
 
 // resolveResourceSubtype discovers a resource's subtype, which ExportTabularData requires but a
@@ -189,10 +197,12 @@ func sequenceTabularFileNames(resources []*datapb.SequenceResourceFilter) []stri
 	seen := map[string]int{}
 	for _, resource := range resources {
 		var parts []string
-		if name := sanitizeForFileName(resource.GetResourceName()); name != "" {
+
+		// Sanitize name just in case.
+		if name := strings.Trim(regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(resource.GetResourceName(), "_"), "_."); name != "" {
 			parts = append(parts, name)
 		}
-		if method := sanitizeForFileName(resource.GetMethodName()); method != "" {
+		if method := resource.GetMethodName(); method != "" {
 			parts = append(parts, method)
 		}
 		if len(parts) == 0 {
@@ -206,6 +216,7 @@ func sequenceTabularFileNames(resources []*datapb.SequenceResourceFilter) []stri
 		}
 		names = append(names, base+".ndjson")
 	}
+
 	return names
 }
 
@@ -274,15 +285,14 @@ func (l *progressLine) erase() {
 	}
 }
 
-func sanitizeForFileName(s string) string {
-	return strings.Trim(unsafeFileNameChars.ReplaceAllString(s, "_"), "_.")
-}
-
 // exportSequenceBinary downloads every binary datum the sequence references into
 // <destination>/binary, using the same layout and parallel-download machinery as
 // `data export binary`, and reports the result per resource so the section reads like the
 // tabular one above it.
-func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst string, parallel, timeout uint) error {
+func (c *viamClient) exportSequenceBinary(
+	ctx context.Context, sequenceID string, resources []*datapb.SequenceResourceFilter,
+	dst string, parallel, timeout uint,
+) error {
 	binaryDst := filepath.Join(dst, sequenceBinaryExportDir)
 
 	// resourceOf is populated while paging and read by the download workers, so both sides take
@@ -291,6 +301,9 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 	var progressMu sync.Mutex
 	resourceOf := map[string]string{}
 	countByResource := map[string]int{}
+	for _, resource := range resources {
+		countByResource[resourceLabel(resource.GetResourceName(), resource.GetMethodName())] = 0
+	}
 	var downloaded atomic.Int32
 
 	fetchIDsInto := func(ctx context.Context, ids chan<- string) error {
@@ -331,7 +344,7 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 		line.erase()
 		return err
 	}
-	if downloaded.Load() == 0 {
+	if len(countByResource) == 0 {
 		printf(c.c.Root().Writer, "  none")
 		return nil
 	}
@@ -344,10 +357,13 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 	return nil
 }
 
-// sequenceResourceLabel names the resource a datum was captured from, matching how the tabular
-// section labels its lines.
+// sequenceResourceLabel names the resource a datum was captured from.
 func sequenceResourceLabel(meta *datapb.CaptureMetadata) string {
-	name, method := meta.GetComponentName(), meta.GetMethodName()
+	return resourceLabel(meta.GetComponentName(), meta.GetMethodName())
+}
+
+// resourceLabel formats a resource the way both export sections label their lines.
+func resourceLabel(name, method string) string {
 	switch {
 	case name == "" && method == "":
 		return "unknown resource"
