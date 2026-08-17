@@ -118,7 +118,7 @@ func (c *viamClient) downloadSequenceBinaryBlobs(
 					return
 				}
 				if n := done.Add(1); n%100 == 0 {
-					printf(c.c.Root().Writer, "Downloaded %d binary blobs", n)
+					printf(c.c.Root().Writer, "Downloaded %s", pluralize(int(n), "binary blob"))
 				}
 			}
 		}()
@@ -133,7 +133,7 @@ func (c *viamClient) downloadSequenceBinaryBlobs(
 		allErrs = multierr.Append(allErrs, e)
 	}
 	if allErrs == nil {
-		printf(c.c.Root().Writer, "Done — wrote %d binary blobs to %s", done.Load(), binaryDir)
+		printf(c.c.Root().Writer, "Done — wrote %s to %s", pluralize(int(done.Load()), "binary blob"), binaryDir)
 	}
 	return allErrs
 }

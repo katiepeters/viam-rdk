@@ -118,8 +118,8 @@ func (c *viamClient) mergeDatasets(orgID, newDatasetName string, datasetIDs []st
 	if err != nil {
 		return errors.Wrapf(err, "received error from server")
 	}
-	printf(c.c.Root().Writer, "Successfully merged %d datasets into new dataset '%s' with ID: %s",
-		len(datasetIDs), newDatasetName, resp.GetDatasetId())
+	printf(c.c.Root().Writer, "Successfully merged %s into new dataset '%s' with ID: %s",
+		pluralize(len(datasetIDs), "dataset"), newDatasetName, resp.GetDatasetId())
 	return nil
 }
 
@@ -302,7 +302,7 @@ func (c *viamClient) downloadDataset(
 			DatasetId: datasetID,
 		}, parallelDownloads,
 		func(i int32) {
-			printf(c.c.Root().Writer, "Downloaded %d files", i)
+			printf(c.c.Root().Writer, "Downloaded %s", pluralize(int(i), "file"))
 		},
 	)
 }
