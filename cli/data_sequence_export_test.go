@@ -418,7 +418,7 @@ func TestDataExportSequenceAction_BinaryLogging(t *testing.T) {
 
 		logged := strings.Join(out.messages, "")
 		// Counted against the resource it came from, matching how the tabular section reads.
-		test.That(t, logged, test.ShouldContainSubstring, "Binary data (binary/):\n  camera-1 GetImages: 1 files")
+		test.That(t, logged, test.ShouldContainSubstring, "Binary data (binary/):\n  camera-1 GetImages: 1 file")
 		test.That(t, logged, test.ShouldNotContainSubstring, "none")
 		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
 	})
@@ -478,10 +478,21 @@ func TestDataExportSequenceAction_SkipsBinaryCaptureMethods(t *testing.T) {
 	test.That(t, logged, test.ShouldNotContainSubstring, "no tabular data")
 }
 
+func TestPluralize(t *testing.T) {
+	// Only exactly one is singular; zero takes the plural.
+	test.That(t, pluralize(0, "file"), test.ShouldEqual, "0 files")
+	test.That(t, pluralize(1, "file"), test.ShouldEqual, "1 file")
+	test.That(t, pluralize(2, "file"), test.ShouldEqual, "2 files")
+	test.That(t, pluralize(1, "row"), test.ShouldEqual, "1 row")
+	test.That(t, pluralize(1234, "row"), test.ShouldEqual, "1234 rows")
+}
+
 func TestProgressLine(t *testing.T) {
+	rowTail := func(n int) string { return " (" + pluralize(n, "row") + ")" }
+
 	t.Run("redraws in place on a terminal", func(t *testing.T) {
 		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: " (%d rows)", terminal: true}
+		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: rowTail, terminal: true}
 		line.start()
 		line.update(100)
 		line.finish(250)
@@ -494,7 +505,7 @@ func TestProgressLine(t *testing.T) {
 
 	t.Run("off a terminal writes the line once", func(t *testing.T) {
 		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: " (%d rows)"}
+		line := &progressLine{w: &buf, prefix: "  cam Readings: cam.ndjson", tail: rowTail}
 		line.start()
 		line.update(100) // no cursor to move, so intermediate counts are dropped
 		line.finish(250)
@@ -504,7 +515,7 @@ func TestProgressLine(t *testing.T) {
 
 	t.Run("writes a whole line when start was skipped", func(t *testing.T) {
 		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  ", tail: "%d files"}
+		line := &progressLine{w: &buf, prefix: "  ", tail: func(n int) string { return pluralize(n, "file") }}
 		line.finish(18)
 
 		test.That(t, buf.String(), test.ShouldEqual, "  18 files\n")
@@ -514,7 +525,7 @@ func TestProgressLine(t *testing.T) {
 	// treated as a format string.
 	t.Run("does not interpret verbs in the prefix", func(t *testing.T) {
 		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  rate%s %d: f.ndjson", tail: " (%d rows)"}
+		line := &progressLine{w: &buf, prefix: "  rate%s %d: f.ndjson", tail: rowTail}
 		line.finish(7)
 
 		test.That(t, buf.String(), test.ShouldEqual, "  rate%s %d: f.ndjson (7 rows)\n")

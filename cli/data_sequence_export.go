@@ -131,7 +131,7 @@ func (c *viamClient) exportSequenceTabular(ctx context.Context, sequence *datapb
 
 		line := newProgressLine(c.c.Root().Writer,
 			fmt.Sprintf("  %s %s: %s", resource.GetResourceName(), resource.GetMethodName(), names[i]),
-			" (%d rows)")
+			func(rows int) string { return " (" + pluralize(rows, "row") + ")" })
 		line.start()
 
 		// io.Discard for the writer: its only output is a dot per retry attempt, which the row
@@ -216,20 +216,20 @@ func sequenceTabularFileNames(resources []*datapb.SequenceResourceFilter) []stri
 type progressLine struct {
 	w        io.Writer
 	prefix   string
-	tail     string // a format taking the running count, e.g. " (%d rows)"
+	tail     func(count int) string // the changing part, e.g. " (1234 rows)"
 	terminal bool
 	started  bool
 	width    int // characters last drawn, so erase knows how much to blank
 }
 
-func newProgressLine(w io.Writer, prefix, tail string) *progressLine {
+func newProgressLine(w io.Writer, prefix string, tail func(count int) string) *progressLine {
 	return &progressLine{w: w, prefix: prefix, tail: tail, terminal: isTerminalOutput()}
 }
 
-// render builds the line by concatenation rather than one format string, because prefix is
-// caller-supplied (a resource name may well contain a '%').
+// render builds the line by concatenation, never as one format string: prefix is caller-supplied
+// and a resource name may well contain a '%'.
 func (l *progressLine) render(count int) string {
-	return l.prefix + fmt.Sprintf(l.tail, count)
+	return l.prefix + l.tail(count)
 }
 
 // start writes the prefix before any counting begins, so slow work is attributable while it runs.
@@ -255,7 +255,7 @@ func (l *progressLine) finish(count int) {
 		fmt.Fprint(l.w, "\r"+l.render(count)+"\n") //nolint:errcheck
 	case l.started:
 		// The prefix is already on the line; only the count is outstanding.
-		fmt.Fprint(l.w, fmt.Sprintf(l.tail, count)+"\n") //nolint:errcheck
+		fmt.Fprint(l.w, l.tail(count)+"\n") //nolint:errcheck
 	default:
 		fmt.Fprint(l.w, l.render(count)+"\n") //nolint:errcheck
 	}
@@ -311,7 +311,7 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 		})
 	}
 
-	line := newProgressLine(c.c.Root().Writer, "  ", "%d files")
+	line := newProgressLine(c.c.Root().Writer, "  ", func(files int) string { return pluralize(files, "file") })
 	download := func(ctx context.Context, id string) error {
 		if err := c.downloadBinary(ctx, binaryDst, timeout, id); err != nil {
 			return err
@@ -339,7 +339,7 @@ func (c *viamClient) exportSequenceBinary(ctx context.Context, sequenceID, dst s
 	// Replace the running total with the per-resource split.
 	line.erase()
 	for _, resource := range slices.Sorted(maps.Keys(countByResource)) {
-		printf(c.c.Root().Writer, "  %s: %d files", resource, countByResource[resource])
+		printf(c.c.Root().Writer, "  %s: %s", resource, pluralize(countByResource[resource], "file"))
 	}
 	return nil
 }

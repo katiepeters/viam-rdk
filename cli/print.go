@@ -21,6 +21,16 @@ const asciiViam = `
 
 `
 
+// pluralize renders a count together with its noun, using the plural form for everything except
+// exactly one -- "0 files", "1 file", "2 files". Only regular nouns are covered; an irregular one
+// needs its own formatting rather than a second parameter here.
+func pluralize(count int, noun string) string {
+	if count == 1 {
+		return fmt.Sprintf("%d %s", count, noun)
+	}
+	return fmt.Sprintf("%d %ss", count, noun)
+}
+
 // printf prints a message with no prefix.
 func printf(w io.Writer, format string, a ...interface{}) {
 	fmt.Fprintf(w, format+"\n", a...) //nolint:errcheck
