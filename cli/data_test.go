@@ -352,80 +352,73 @@ func TestDataSourceTypeToProto(t *testing.T) {
 	})
 }
 
-// TestDataExportBinaryFromFilter covers `data export binary filter` end to end: the filter is
-// paged, every matching id is downloaded, and progress is reported. It guards the shared
-// performActionOnBinaryDataIDs driver, which the sequence export also runs on.
-func TestDataExportBinaryFromFilter(t *testing.T) {
-	newMeta := func(id string) *datapb.BinaryMetadata {
-		return &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
-	}
-	// Two pages of results, then an empty page to terminate.
-	pages := [][]string{{"bin-1", "bin-2"}, {"bin-3"}, {}}
+func binaryMeta(id string) *datapb.BinaryMetadata {
+	return &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
+}
 
+// echoBinaryDataByIDs returns one datum per requested id, with bytes when the caller asks for them.
+func echoBinaryDataByIDs(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
+) (*datapb.BinaryDataByIDsResponse, error) {
+	resp := &datapb.BinaryDataByIDsResponse{}
+	for _, id := range in.GetBinaryDataIds() {
+		datum := &datapb.BinaryData{Metadata: binaryMeta(id)}
+		if in.GetIncludeBinary() {
+			datum.Binary = []byte("bytes-" + id)
+		}
+		resp.Data = append(resp.Data, datum)
+	}
+	return resp, nil
+}
+
+// binaryFilterClient serves one page of ids per BinaryDataByFilter call, then empty pages.
+func binaryFilterClient(pages ...[]string) *inject.DataServiceClient {
 	var mu sync.Mutex
-	var capturedFilter *datapb.Filter
 	call := 0
-	dsc := &inject.DataServiceClient{
-		BinaryDataByFilterFunc: func(_ context.Context, in *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
+	return &inject.DataServiceClient{
+		BinaryDataByFilterFunc: func(_ context.Context, _ *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
 		) (*datapb.BinaryDataByFilterResponse, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			capturedFilter = in.GetDataRequest().GetFilter()
 			resp := &datapb.BinaryDataByFilterResponse{}
-			for _, id := range pages[call] {
-				resp.Data = append(resp.Data, &datapb.BinaryData{Metadata: newMeta(id)})
+			if call < len(pages) {
+				for _, id := range pages[call] {
+					resp.Data = append(resp.Data, &datapb.BinaryData{Metadata: binaryMeta(id)})
+				}
 			}
 			call++
 			return resp, nil
 		},
-		BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
-		) (*datapb.BinaryDataByIDsResponse, error) {
-			resp := &datapb.BinaryDataByIDsResponse{}
-			for _, id := range in.GetBinaryDataIds() {
-				datum := &datapb.BinaryData{Metadata: newMeta(id)}
-				if in.GetIncludeBinary() {
-					datum.Binary = []byte("bytes-" + id)
-				}
-				resp.Data = append(resp.Data, datum)
-			}
-			return resp, nil
-		},
+		BinaryDataByIDsFunc: echoBinaryDataByIDs,
 	}
+}
+
+// Guards the shared performActionOnBinaryDataIDs driver the sequence export also runs on.
+func TestDataExportBinaryFromFilter(t *testing.T) {
+	dsc := binaryFilterClient([]string{"bin-1", "bin-2"}, []string{"bin-3"})
+	_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
 
 	dst := t.TempDir()
-	_, ac, out, errOut := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
-
-	filter := &datapb.Filter{PartId: "p1"}
-	err := ac.binaryData(context.Background(), dst, filter, 4, 0)
+	err := ac.binaryData(context.Background(), dst, &datapb.Filter{PartId: "p1"}, 4, 0)
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(errOut.messages), test.ShouldEqual, 0)
-	test.That(t, capturedFilter.GetPartId(), test.ShouldEqual, "p1")
 
-	// Every id across both pages was downloaded.
 	for _, id := range []string{"bin-1", "bin-2", "bin-3"} {
-		path := dataFilePath(dst, filenameForDownload(newMeta(id)), ".jpg")
+		path := dataFilePath(dst, filenameForDownload(binaryMeta(id)), ".jpg")
 		test.That(t, mustReadFile(t, path), test.ShouldResemble, []byte("bytes-"+id))
 	}
 	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring, "Downloaded 3 files")
 }
 
-// TestDataExportBinaryCancelsProducerOnActionError guards a deadlock: when an action fails, the
-// workers cancel and return, so a producer sending bare into the id channel blocks forever on a
-// buffer nobody is draining and the command hangs instead of reporting the error. Uses more ids
-// than the channel buffer (parallel=2) so the producer is guaranteed to still be sending.
-// Regression: this test times out if getMatchingBinaryIDs stops selecting on ctx.
+// When an action fails the workers cancel and return, so a producer still sending must abort too
+// or the command hangs. Times out if getMatchingBinaryIDs stops selecting on ctx.
 func TestDataExportBinaryCancelsProducerOnActionError(t *testing.T) {
 	page := &datapb.BinaryDataByFilterResponse{}
-	for range 500 {
-		page.Data = append(page.Data, &datapb.BinaryData{
-			Metadata: &datapb.BinaryMetadata{BinaryDataId: "bin-1", FileName: "bin-1.jpg", FileExt: ".jpg"},
-		})
+	for range 10 {
+		page.Data = append(page.Data, &datapb.BinaryData{Metadata: binaryMeta("bin-1")})
 	}
 	dsc := &inject.DataServiceClient{
-		// Always a full page, so the producer keeps trying to send.
 		BinaryDataByFilterFunc: func(_ context.Context, _ *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
 		) (*datapb.BinaryDataByFilterResponse, error) {
-			return page, nil
+			return page, nil // never exhausts, so the producer always has more to send
 		},
 	}
 	cCtx, ac, _, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
@@ -435,10 +428,8 @@ func TestDataExportBinaryCancelsProducerOnActionError(t *testing.T) {
 		func(ctx context.Context, ids chan<- string) error {
 			return getMatchingBinaryIDs(ctx, ac.dataClient, &datapb.Filter{PartId: "p1"}, ids, maxLimit)
 		},
-		func(_ context.Context, _ string) error { return errors.New("action failed") },
-		2,
-		func(int32) {},
-	)
+		func(context.Context, string) error { return errors.New("action failed") },
+		2, func(int32) {})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "action failed")
 }

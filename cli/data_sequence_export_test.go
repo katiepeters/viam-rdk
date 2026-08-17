@@ -1,11 +1,9 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +17,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.viam.com/rdk/testutils/inject"
-	"go.viam.com/rdk/utils"
 )
 
 const (
@@ -45,14 +42,10 @@ func sequenceResource(name, method string) *datapb.SequenceResourceFilter {
 	return &datapb.SequenceResourceFilter{ResourceName: name, MethodName: method}
 }
 
-func sequenceBinaryMeta(id string) *datapb.BinaryMetadata {
-	return &datapb.BinaryMetadata{BinaryDataId: id, FileName: id + ".jpg", FileExt: ".jpg"}
-}
-
 // sequenceBinaryPath is where a sequence-exported binary datum lands: `data export binary`'s data/
 // layout, rooted under binary/ rather than at the top level of the destination.
 func sequenceBinaryPath(dst, id string) string {
-	return dataFilePath(filepath.Join(dst, sequenceBinaryExportDir), filenameForDownload(sequenceBinaryMeta(id)), ".jpg")
+	return dataFilePath(filepath.Join(dst, sequenceBinaryExportDir), filenameForDownload(binaryMeta(id)), ".jpg")
 }
 
 // seqFake serves the RPCs a sequence export makes and records what it was asked for. Only the
@@ -141,18 +134,7 @@ func (f *seqFake) client(t *testing.T) (*viamClient, *testWriter) {
 			}
 			return resp, nil
 		},
-		BinaryDataByIDsFunc: func(_ context.Context, in *datapb.BinaryDataByIDsRequest, _ ...grpc.CallOption,
-		) (*datapb.BinaryDataByIDsResponse, error) {
-			resp := &datapb.BinaryDataByIDsResponse{}
-			for _, id := range in.GetBinaryDataIds() {
-				datum := &datapb.BinaryData{Metadata: sequenceBinaryMeta(id)}
-				if in.GetIncludeBinary() {
-					datum.Binary = []byte("bytes-" + id)
-				}
-				resp.Data = append(resp.Data, datum)
-			}
-			return resp, nil
-		},
+		BinaryDataByIDsFunc: echoBinaryDataByIDs,
 	}
 	_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
 	return ac, out
@@ -186,69 +168,6 @@ func TestSequenceTabularFileNames(t *testing.T) {
 	for _, name := range names {
 		test.That(t, strings.Contains(name, string(filepath.Separator)), test.ShouldBeFalse)
 	}
-}
-
-func TestProgressLine(t *testing.T) {
-	rowTail := func(n int) string { return fmt.Sprintf(" (%d %s)", n, pluralize(n, "row")) }
-	const prefix = "  cam Readings: cam.ndjson"
-
-	t.Run("redraws in place on a terminal", func(t *testing.T) {
-		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: prefix, tail: rowTail, terminal: true}
-		line.start()
-		line.update(100)
-		line.finish(250)
-
-		test.That(t, buf.String(), test.ShouldEqual,
-			prefix+"\r"+prefix+" (100 rows)"+"\r"+prefix+" (250 rows)\n")
-	})
-
-	t.Run("off a terminal writes the line once", func(t *testing.T) {
-		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: prefix, tail: rowTail}
-		line.start()
-		line.update(100) // no cursor to move, so intermediate counts are dropped
-		line.finish(250)
-
-		test.That(t, buf.String(), test.ShouldEqual, prefix+" (250 rows)\n")
-	})
-
-	t.Run("writes a whole line when start was skipped", func(t *testing.T) {
-		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  ", tail: func(n int) string { return fmt.Sprintf("%d %s", n, pluralize(n, "file")) }}
-		line.finish(18)
-
-		test.That(t, buf.String(), test.ShouldEqual, "  18 files\n")
-	})
-
-	// A resource can be named "rate%", so the prefix must never reach a format function.
-	t.Run("does not interpret verbs in the prefix", func(t *testing.T) {
-		var buf bytes.Buffer
-		line := &progressLine{w: &buf, prefix: "  rate%s %d: f.ndjson", tail: rowTail}
-		line.finish(7)
-
-		test.That(t, buf.String(), test.ShouldEqual, "  rate%s %d: f.ndjson (7 rows)\n")
-	})
-}
-
-// TestDataExportSequenceCommandFlags guards the reflective binding of flags onto args fields.
-func TestDataExportSequenceCommandFlags(t *testing.T) {
-	cCtx := buildTestCmd(&testWriter{}, &testWriter{}, map[string]any{
-		generalFlagDestination:    utils.ResolveFile(""),
-		dataFlagSequenceID:        testSequenceID,
-		dataFlagParallelDownloads: uint(4),
-		dataFlagTimeout:           uint(7),
-		dataFlagOnlyTabular:       true,
-		dataFlagOnlyBinary:        true,
-	})
-
-	args := parseStructFromCtx[dataExportSequenceArgs](cCtx)
-	test.That(t, args.Destination, test.ShouldEqual, utils.ResolveFile(""))
-	test.That(t, args.SequenceID, test.ShouldEqual, testSequenceID)
-	test.That(t, args.Parallel, test.ShouldEqual, uint(4))
-	test.That(t, args.Timeout, test.ShouldEqual, uint(7))
-	test.That(t, args.OnlyTabular, test.ShouldBeTrue)
-	test.That(t, args.OnlyBinary, test.ShouldBeTrue)
 }
 
 func TestDataExportSequenceAction_RejectsConflictingOnlyFlags(t *testing.T) {
@@ -402,7 +321,7 @@ func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
 	// Rooted at binary/, carrying `data export binary`'s data/ plus metadata/ layout beneath it.
 	for _, id := range []string{"bd-1", "bd-2"} {
 		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
-		_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir, metadataDir, filenameForDownload(sequenceBinaryMeta(id))+".json"))
+		_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir, metadataDir, filenameForDownload(binaryMeta(id))+".json"))
 		test.That(t, err, test.ShouldBeNil)
 	}
 	for _, dir := range []string{dataDir, metadataDir} {

@@ -106,8 +106,6 @@ func (c *viamClient) exportSequenceTabular(
 			return err
 		}
 		if subtype == "" {
-			// A module's binary method is not on MethodToCaptureType's list, so it is partitioned as
-			// tabular and lands here instead; either way, no rows means nothing to export.
 			printf(c.c.Root().Writer, "  %s %s: no tabular data in the sequence's interval, skipping",
 				resource.GetResourceName(), resource.GetMethodName())
 			continue
@@ -140,8 +138,7 @@ func (c *viamClient) exportSequenceTabular(
 }
 
 // partitionResourcesByCaptureType splits a sequence's resources by what their capture method
-// produces. MethodToCaptureType defaults anything it does not recognise to tabular, so a module's
-// binary method lands in tabular and is skipped later when its subtype lookup finds no rows.
+// produces. MethodToCaptureType defaults anything it does not recognise to tabular.
 func partitionResourcesByCaptureType(
 	resources []*datapb.SequenceResourceFilter,
 ) (tabular, binary []*datapb.SequenceResourceFilter) {
@@ -158,9 +155,7 @@ func partitionResourcesByCaptureType(
 // resolveResourceSubtype discovers a resource's subtype, which ExportTabularData requires but a
 // SequenceResourceFilter does not record. It asks for a single captured row matching the same
 // part, resource, method, and interval the export will use, and reads the subtype off that row's
-// CaptureMetadata. Returns "" when the resource has no tabular data in the interval -- which is
-// the normal case for a binary-only resource such as a camera, so it means "nothing to export
-// here", not "this resource is empty".
+// CaptureMetadata. Returns "" when the resource has no tabular data in the interval.
 func (c *viamClient) resolveResourceSubtype(
 	ctx context.Context, partID string, resource *datapb.SequenceResourceFilter, interval *datapb.CaptureInterval,
 ) (string, error) {
@@ -218,71 +213,6 @@ func sequenceTabularFileNames(resources []*datapb.SequenceResourceFilter) []stri
 	}
 
 	return names
-}
-
-// progressLine renders a single line whose only changing part is a running count. On a terminal it
-// rewrites that line in place, so the count stays legible whether it counts to ten or ten million.
-// Piped or redirected there is no cursor to move, so carriage returns would just pile up in the
-// log; there the line is written once, when the count is final.
-type progressLine struct {
-	w        io.Writer
-	prefix   string
-	tail     func(count int) string // the changing part, e.g. " (1234 rows)"
-	terminal bool
-	started  bool
-	width    int // characters last drawn, so erase knows how much to blank
-}
-
-func newProgressLine(w io.Writer, prefix string, tail func(count int) string) *progressLine {
-	return &progressLine{w: w, prefix: prefix, tail: tail, terminal: isTerminalOutput()}
-}
-
-// render builds the line by concatenation, never as one format string: prefix is caller-supplied
-// and a resource name may well contain a '%'.
-func (l *progressLine) render(count int) string {
-	return l.prefix + l.tail(count)
-}
-
-// start writes the prefix before any counting begins, so slow work is attributable while it runs.
-// Callers that cannot commit to a line yet (the count may end up zero) skip it.
-func (l *progressLine) start() {
-	l.started = true
-	fmt.Fprint(l.w, l.prefix) //nolint:errcheck
-}
-
-// update redraws the line with the running count. The count only grows, so a redraw never has to
-// clear characters left behind by a longer previous value.
-func (l *progressLine) update(count int) {
-	if l.terminal {
-		drawn := l.render(count)
-		l.width = len(drawn)
-		fmt.Fprint(l.w, "\r"+drawn) //nolint:errcheck
-	}
-}
-
-func (l *progressLine) finish(count int) {
-	switch {
-	case l.terminal:
-		fmt.Fprint(l.w, "\r"+l.render(count)+"\n") //nolint:errcheck
-	case l.started:
-		// The prefix is already on the line; only the count is outstanding.
-		fmt.Fprint(l.w, l.tail(count)+"\n") //nolint:errcheck
-	default:
-		fmt.Fprint(l.w, l.render(count)+"\n") //nolint:errcheck
-	}
-}
-
-// abandon closes the line so whatever follows starts on its own.
-func (l *progressLine) abandon() {
-	fmt.Fprintln(l.w) //nolint:errcheck
-}
-
-// erase removes the line entirely, for a caller that replaces a running total with a fuller
-// breakdown. Off a terminal nothing was drawn, so there is nothing to take back.
-func (l *progressLine) erase() {
-	if l.terminal {
-		fmt.Fprint(l.w, "\r"+strings.Repeat(" ", l.width)+"\r") //nolint:errcheck
-	}
 }
 
 // exportSequenceBinary downloads every binary datum the sequence references into
