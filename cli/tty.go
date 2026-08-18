@@ -10,3 +10,8 @@ import (
 func isInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
+
+// isTerminalOutput reports whether stdout is connected to a terminal.
+func isTerminalOutput() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
+}
