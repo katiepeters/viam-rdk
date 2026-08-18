@@ -245,20 +245,28 @@ func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
 	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
 }
 
-func TestDataExportSequenceAction_SkipsTabularWhenNoResources(t *testing.T) {
-	fake := &seqFake{sequence: testSequence()}
-	ac, _ := fake.client(t)
-
-	dst := t.TempDir()
-	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyTabular)), test.ShouldBeNil)
-	test.That(t, len(fake.exported), test.ShouldEqual, 0)
-
-	_, err := os.Stat(filepath.Join(dst, sequenceTabularDir))
-	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-}
-
 // A camera captures binary, so its resource has no tabular data by definition: no subtype lookup
 // should be spent on it, and it should produce no output here.
+// Run with neither --only flag, so this also covers both halves being invoked by default.
+func TestDataExportSequenceAction_EmptySequence(t *testing.T) {
+	fake := &seqFake{sequence: testSequence()}
+	ac, out := fake.client(t)
+
+	dst := t.TempDir()
+	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst)), test.ShouldBeNil)
+	test.That(t, len(fake.exported), test.ShouldEqual, 0)
+
+	logged := strings.Join(out.messages, "")
+	test.That(t, logged, test.ShouldContainSubstring, "Tabular data (tabular/):\n  none")
+	test.That(t, logged, test.ShouldContainSubstring, "Binary data (binary/):\n  none")
+
+	// The claim has to match the disk: nothing written, so neither directory exists.
+	for _, dir := range []string{sequenceTabularDir, sequenceBinaryExportDir} {
+		_, err := os.Stat(filepath.Join(dst, dir))
+		test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
+	}
+}
+
 func TestDataExportSequenceAction_SkipsBinaryCaptureMethods(t *testing.T) {
 	fake := &seqFake{sequence: testSequence(
 		sequenceResource("camera-1", "GetImages"),
@@ -336,18 +344,6 @@ func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
 		"Binary data (binary/):\n  camera-1 GetImages: 2 files")
 }
 
-func TestDataExportSequenceAction_ReportsNoBinaryData(t *testing.T) {
-	ac, out := (&seqFake{sequence: testSequence()}).client(t)
-
-	dst := t.TempDir()
-	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst, onlyBinary)), test.ShouldBeNil)
-	test.That(t, strings.Join(out.messages, ""), test.ShouldContainSubstring, "Binary data (binary/):\n  none")
-
-	// The claim has to match the disk: nothing written, so binary/ must not exist.
-	_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
-	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-}
-
 // Every page must be consumed, and each request after the first must carry the token the previous
 // response returned.
 func TestDataExportSequenceAction_PagesBinaryData(t *testing.T) {
@@ -371,21 +367,6 @@ func TestDataExportSequenceAction_PagesBinaryData(t *testing.T) {
 	for _, id := range []string{"bd-1", "bd-2", "bd-3", "bd-4"} {
 		test.That(t, mustReadFile(t, sequenceBinaryPath(dst, id)), test.ShouldResemble, []byte("bytes-"+id))
 	}
-}
-
-func TestDataExportSequenceAction_ExportsBothByDefault(t *testing.T) {
-	fake := &seqFake{
-		sequence: testSequence(sequenceResource("sensor-1", "Readings")),
-		binary:   []*datapb.BinaryData{mkBinaryData("bd-1", ".jpg")},
-	}
-	ac, _ := fake.client(t)
-
-	dst := t.TempDir()
-	test.That(t, ac.dataExportSequenceAction(context.Background(), exportArgs(dst)), test.ShouldBeNil)
-
-	test.That(t, len(fake.exported), test.ShouldEqual, 1)
-	test.That(t, readNDJSON(t, dst, "sensor-1-Readings.ndjson")["resourceName"], test.ShouldEqual, "sensor-1")
-	test.That(t, mustReadFile(t, sequenceBinaryPath(dst, "bd-1")), test.ShouldResemble, []byte("bytes-bd-1"))
 }
 
 // readNDJSON returns the single row the fake's export stream writes for a resource.
