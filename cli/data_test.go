@@ -370,22 +370,31 @@ func echoBinaryDataByIDs(_ context.Context, in *datapb.BinaryDataByIDsRequest, _
 	return resp, nil
 }
 
-// binaryFilterClient serves one page of ids per BinaryDataByFilter call, then empty pages.
-func binaryFilterClient(pages ...[]string) *inject.DataServiceClient {
-	var mu sync.Mutex
-	call := 0
+// binaryFilterFake serves one page of ids per BinaryDataByFilter call, then empty pages, and
+// records the filter it was asked with.
+type binaryFilterFake struct {
+	pages [][]string
+
+	mu     sync.Mutex
+	call   int
+	filter *datapb.Filter
+}
+
+func (f *binaryFilterFake) client() *inject.DataServiceClient {
 	return &inject.DataServiceClient{
-		BinaryDataByFilterFunc: func(_ context.Context, _ *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
+		BinaryDataByFilterFunc: func(_ context.Context, in *datapb.BinaryDataByFilterRequest, _ ...grpc.CallOption,
 		) (*datapb.BinaryDataByFilterResponse, error) {
-			mu.Lock()
-			defer mu.Unlock()
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.filter = in.GetDataRequest().GetFilter()
+
 			resp := &datapb.BinaryDataByFilterResponse{}
-			if call < len(pages) {
-				for _, id := range pages[call] {
+			if f.call < len(f.pages) {
+				for _, id := range f.pages[f.call] {
 					resp.Data = append(resp.Data, &datapb.BinaryData{Metadata: binaryMeta(id)})
 				}
 			}
-			call++
+			f.call++
 			return resp, nil
 		},
 		BinaryDataByIDsFunc: echoBinaryDataByIDs,
@@ -394,12 +403,13 @@ func binaryFilterClient(pages ...[]string) *inject.DataServiceClient {
 
 // Guards the shared performActionOnBinaryDataIDs driver the sequence export also runs on.
 func TestDataExportBinaryFromFilter(t *testing.T) {
-	dsc := binaryFilterClient([]string{"bin-1", "bin-2"}, []string{"bin-3"})
-	_, ac, out, _ := setup(&inject.AppServiceClient{}, dsc, nil, nil, "token")
+	fake := &binaryFilterFake{pages: [][]string{{"bin-1", "bin-2"}, {"bin-3"}}}
+	_, ac, out, _ := setup(&inject.AppServiceClient{}, fake.client(), nil, nil, "token")
 
 	dst := t.TempDir()
 	err := ac.binaryData(context.Background(), dst, &datapb.Filter{PartId: "p1"}, 4, 0)
 	test.That(t, err, test.ShouldBeNil)
+	test.That(t, fake.filter.GetPartId(), test.ShouldEqual, "p1")
 
 	for _, id := range []string{"bin-1", "bin-2", "bin-3"} {
 		path := dataFilePath(dst, filenameForDownload(binaryMeta(id)), ".jpg")

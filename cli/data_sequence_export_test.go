@@ -140,7 +140,9 @@ func (f *seqFake) client(t *testing.T) (*viamClient, *testWriter) {
 	return ac, out
 }
 
-func exportArgs(dst string, mutate ...func(*dataExportSequenceArgs)) dataExportSequenceArgs {
+type argMutator = func(*dataExportSequenceArgs)
+
+func exportArgs(dst string, mutate ...argMutator) dataExportSequenceArgs {
 	args := dataExportSequenceArgs{Destination: dst, SequenceID: testSequenceID, Parallel: 2}
 	for _, m := range mutate {
 		m(&args)
@@ -170,20 +172,46 @@ func TestSequenceTabularFileNames(t *testing.T) {
 	}
 }
 
-func TestDataExportSequenceAction_RejectsConflictingOnlyFlags(t *testing.T) {
-	ac, _ := (&seqFake{sequence: testSequence()}).client(t)
+func TestDataExportSequenceAction_Errors(t *testing.T) {
+	sensor := testSequence(sequenceResource("sensor-1", "Readings"))
+	for _, tc := range []struct {
+		name    string
+		fake    *seqFake
+		args    []argMutator
+		wantErr []string
+	}{
+		{
+			"both only flags", &seqFake{sequence: testSequence()},
+			[]argMutator{onlyTabular, onlyBinary},
+			[]string{"cannot both be provided"},
+		},
+		{"missing sequence", &seqFake{}, nil, []string{"not found"}},
+		{
+			"subtype lookup fails", &seqFake{sequence: sensor, subtypeErr: errors.New("lookup boom")},
+			[]argMutator{onlyTabular},
+			[]string{"sensor-1", "lookup boom"},
+		},
+		{
+			"tabular export fails", &seqFake{sequence: sensor, exportErr: errors.New("export boom")},
+			[]argMutator{onlyTabular},
+			[]string{"sensor-1", "export boom"},
+		},
+		{
+			"binary listing fails", &seqFake{sequence: testSequence(), binaryErr: errors.New("server boom")},
+			[]argMutator{onlyBinary},
+			[]string{"server boom"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ac, _ := tc.fake.client(t)
 
-	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyTabular, onlyBinary))
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "cannot both be provided")
-}
-
-func TestDataExportSequenceAction_SurfacesMissingSequence(t *testing.T) {
-	ac, _ := (&seqFake{}).client(t)
-
-	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir()))
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "not found")
+			err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), tc.args...))
+			test.That(t, err, test.ShouldNotBeNil)
+			for _, want := range tc.wantErr {
+				test.That(t, err.Error(), test.ShouldContainSubstring, want)
+			}
+		})
+	}
 }
 
 func TestDataExportSequenceAction_ExportsTabularPerResource(t *testing.T) {
@@ -276,32 +304,6 @@ func TestDataExportSequenceAction_SkipsResourceWithNoTabularData(t *testing.T) {
 	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
 }
 
-func TestDataExportSequenceAction_SurfacesSubtypeLookupErrors(t *testing.T) {
-	fake := &seqFake{
-		sequence:   testSequence(sequenceResource("sensor-1", "Readings")),
-		subtypeErr: errors.New("lookup boom"),
-	}
-	ac, _ := fake.client(t)
-
-	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyTabular))
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
-	test.That(t, err.Error(), test.ShouldContainSubstring, "lookup boom")
-}
-
-func TestDataExportSequenceAction_SurfacesTabularErrors(t *testing.T) {
-	fake := &seqFake{
-		sequence:  testSequence(sequenceResource("sensor-1", "Readings")),
-		exportErr: errors.New("boom"),
-	}
-	ac, _ := fake.client(t)
-
-	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyTabular))
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "sensor-1")
-	test.That(t, err.Error(), test.ShouldContainSubstring, "boom")
-}
-
 func TestDataExportSequenceAction_DownloadsBinaryData(t *testing.T) {
 	captured := func(id string) *datapb.BinaryData {
 		bd := mkBinaryData(id, ".jpg")
@@ -344,15 +346,6 @@ func TestDataExportSequenceAction_ReportsNoBinaryData(t *testing.T) {
 	// The claim has to match the disk: nothing written, so binary/ must not exist.
 	_, err := os.Stat(filepath.Join(dst, sequenceBinaryExportDir))
 	test.That(t, os.IsNotExist(err), test.ShouldBeTrue)
-}
-
-func TestDataExportSequenceAction_SurfacesBinaryErrors(t *testing.T) {
-	fake := &seqFake{sequence: testSequence(), binaryErr: errors.New("server boom")}
-	ac, _ := fake.client(t)
-
-	err := ac.dataExportSequenceAction(context.Background(), exportArgs(t.TempDir(), onlyBinary))
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "server boom")
 }
 
 // Every page must be consumed, and each request after the first must carry the token the previous
